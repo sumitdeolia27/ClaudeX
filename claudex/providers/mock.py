@@ -23,6 +23,8 @@ ROLE_RE = re.compile(r"^CLAUDEX-(ROLE|PHASE|ROUND|TITLE):\s*(.+)$", re.M)
 TYPICAL_OUTPUT_TOKENS = {
     "propose": 2200, "revise": 2400, "critique": 1100,
     "judge": 260, "summarize": 200, "assemble": 1200,
+    "product-plan": 900, "product-implement": 1600,
+    "product-review": 500, "product-revise": 1700, "product-repair": 1700,
 }
 
 
@@ -57,6 +59,11 @@ class MockProvider(Provider):
             "judge": self._judge,
             "summarize": self._summarize,
             "assemble": self._assemble,
+            "product-plan": self._product_plan,
+            "product-implement": self._product_implement,
+            "product-review": self._product_review,
+            "product-revise": self._product_implement,
+            "product-repair": self._product_implement,
         }.get(role, self._propose)
         text = builder(phase, title, rnd)
         prompt_chars = len(system) + sum(len(m.get("content", "")) for m in messages)
@@ -162,3 +169,22 @@ concrete choice rather than a list of options.
             "## Executive summary\n\nMock executive summary. With real keys this "
             "is written from the accepted sections of every phase."
         )
+
+    def _product_plan(self, phase: str, title: str, rnd: int) -> str:
+        return """```json
+{"tasks":[{"id":"T001","title":"Create the runnable MVP",
+"objective":"Create a minimal product entry point that proves the build pipeline.",
+"acceptance":["README exists and identifies offline mock output"],
+"depends_on":[]}]}
+```"""
+
+    def _product_implement(self, phase: str, title: str, rnd: int) -> str:
+        return """```json
+{"files":[{"path":"README.md","content":"# Offline mock product\\n\\nStructural output only. Run ClaudeX with real providers to build the product.\\n"}],
+"notes":"Created the deterministic offline product fixture."}
+```"""
+
+    def _product_review(self, phase: str, title: str, rnd: int) -> str:
+        return """```json
+{"approved":true,"issues":[]}
+```"""

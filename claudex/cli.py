@@ -11,6 +11,7 @@ from .config import ModelRegistry, Settings, load_dotenv
 from .debate import DebateEngine
 from .phases import execution_order, load_phases, parse_selection, write_phase_files
 from .providers import ProviderError, ProviderPool, QuotaExceeded
+from .product import ProductEngine
 from .router import Router
 from .state import Run
 from .util import Console, human_duration
@@ -38,6 +39,22 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--write-phases", action="store_true",
                       help="write the 25 phases to config/phases/ so you can edit them")
     init.add_argument("--quiet", action="store_true")
+
+    create = sub.add_parser(
+        "create", help="one prompt -> accepted blueprint -> runnable product"
+    )
+    create.add_argument("idea", nargs="+", help="one-line description of the product")
+    create.add_argument("--name", help="short project name (default: derived from the idea)")
+    create.add_argument("--constraints", default="", help="hard product constraints")
+    create.add_argument("--rounds", type=int, default=2)
+    create.add_argument("--accept-score", type=float, default=80.0)
+    create.add_argument("--lead", default="alternate")
+    create.add_argument("--via", choices=["auto", "api", "cli"], default="auto")
+    create.add_argument("--offline", action="store_true")
+    create.add_argument("--verify-command", default="",
+                        help="human-approved command run without a shell in the product workspace")
+    create.add_argument("--yes", "-y", action="store_true")
+    create.add_argument("--quiet", action="store_true")
 
     run = sub.add_parser("run", help="debate the phases")
     _common(run)
@@ -69,6 +86,20 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--via", choices=["auto", "api", "cli"], default="auto")
     build.add_argument("--no-summary", action="store_true",
                        help="skip the model-written executive summary")
+
+    make = sub.add_parser("make", help="build a runnable product from an accepted blueprint")
+    _common(make)
+    make.add_argument("--via", choices=["auto", "api", "cli"], default="auto")
+    make.add_argument("--offline", action="store_true")
+    make.add_argument("--lead", default="alternate")
+    make.add_argument("--verify-command", default="",
+                      help="human-approved command run without a shell in the product workspace")
+    make.add_argument("--allow-incomplete", action="store_true",
+                      help="build from a partial blueprint (not recommended)")
+    make.add_argument("--force-plan", action="store_true")
+    make.add_argument("--force-tasks", action="store_true")
+    make.add_argument("--no-cache", action="store_true")
+    make.add_argument("--yes", "-y", action="store_true")
 
     status = sub.add_parser("status", help="show phase progress")
     _common(status)
@@ -108,6 +139,31 @@ def cmd_init(args, settings, console) -> int:
     console.say(f"  python -m claudex run --offline      # free dry run, no keys needed")
     console.say(f"  python -m claudex run                # real debate, needs API keys")
     return 0
+
+
+def cmd_create(args, settings, console) -> int:
+    """Execute the complete one-prompt planning and implementation workflow."""
+    idea = " ".join(args.idea).strip()
+    name = args.name or " ".join(idea.split()[:7])
+    run = Run.create(settings, name=name, brief=idea, constraints=args.constraints)
+    console.head(f"Creating {run.name}")
+    console.ok(f"brief saved to runs/{run.slug}/brief.md")
+    run_args = argparse.Namespace(
+        run_slug=run.slug, quiet=args.quiet, phases="all", rounds=args.rounds,
+        accept_score=args.accept_score, lead=args.lead, via=args.via,
+        offline=args.offline, no_profile=False, reprofile=False, no_cache=False,
+        no_dual_judge=False, force=False, yes=args.yes, no_build=False,
+    )
+    result = cmd_run(run_args, settings, console)
+    if result:
+        return result
+    make_args = argparse.Namespace(
+        run_slug=run.slug, quiet=args.quiet, via=args.via, offline=args.offline,
+        lead=args.lead, verify_command=args.verify_command,
+        allow_incomplete=False, force_plan=False, force_tasks=False,
+        no_cache=False, yes=args.yes,
+    )
+    return cmd_make(make_args, settings, console)
 
 
 def _estimate(registry, router, phases, rounds) -> float:
@@ -289,6 +345,50 @@ def cmd_build(args, settings, console) -> int:
     return 0
 
 
+def cmd_make(args, settings, console) -> int:
+    """Build files from an accepted blueprint with adversarial review."""
+    settings.use_cache = not args.no_cache
+    probe = ModelRegistry.load(settings)
+    transport, offline = resolve_transport(args.via, probe, console)
+    offline = offline or args.offline
+    registry = ModelRegistry.load(settings, transport=transport)
+    run = Run.load(settings, args.run_slug)
+    phases = profiler.apply_plan(load_phases(settings), run.data.get("plan"))
+    pending = [phase["id"] for phase in phases if not run.is_done(phase["id"])]
+    if pending and not args.allow_incomplete:
+        console.err(
+            f"Blueprint is incomplete: {len(pending)} phase(s) remain "
+            f"({', '.join(str(pid) for pid in pending)}). Resume `claudex run` first."
+        )
+        return 2
+    router = Router(registry, lead=args.lead, offline=offline)
+    pool = ProviderPool(registry, settings, offline=offline, console=console)
+    console.head(f"Building product for {run.name}")
+    console.say(f"  mode:      {router.describe()}")
+    console.say(f"  workspace: {run.dir / 'product'}")
+    if not offline and transport == "cli":
+        checks = pool.preflight(router.live)
+        for vendor, status in checks.items():
+            (console.err if status.startswith("FAILED") else console.dim)(
+                f"{vendor} cli: {status}"
+            )
+        if any(status.startswith("FAILED") for status in checks.values()):
+            return 2
+    if not offline and transport == "api" and not args.yes and sys.stdin.isatty():
+        answer = input("\nProduct generation uses paid API tokens. Proceed? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            console.say("Cancelled.")
+            return 1
+    engine = ProductEngine(
+        run, router, pool, registry, console, verify_command=args.verify_command
+    )
+    result = engine.build(force_plan=args.force_plan, force_tasks=args.force_tasks)
+    console.ok(f"product complete - {result['tasks']} task(s)")
+    console.say(f"  product: {result['workspace']}")
+    console.say(f"  verification: {result['verification']}")
+    return 0
+
+
 def cmd_status(args, settings, console) -> int:
     run = Run.load(settings, args.run_slug)
     phases = profiler.apply_plan(load_phases(settings), run.data.get("plan"))
@@ -317,6 +417,14 @@ def cmd_status(args, settings, console) -> int:
         f"  {done}/{len(phases)} accepted   "
         f"{totals['calls']} calls   ${totals['cost']:.4f}"
     )
+    product = run.data.get("product") or {}
+    if product:
+        tasks = product.get("tasks") or {}
+        accepted_tasks = sum(1 for task in tasks.values() if task.get("status") == "accepted")
+        console.say(
+            f"  product: {product.get('status', 'unknown')}   "
+            f"{accepted_tasks}/{len(product.get('plan') or [])} tasks accepted"
+        )
     return 0
 
 
@@ -479,7 +587,8 @@ def cmd_setup(args, settings, console) -> int:
 
 COMMANDS = {
     "setup": cmd_setup,
-    "init": cmd_init, "run": cmd_run, "build": cmd_build, "status": cmd_status,
+    "init": cmd_init, "create": cmd_create, "run": cmd_run,
+    "build": cmd_build, "make": cmd_make, "status": cmd_status,
     "cost": cmd_cost, "models": cmd_models, "runs": cmd_runs,
 }
 

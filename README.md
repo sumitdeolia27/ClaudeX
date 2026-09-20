@@ -1,429 +1,364 @@
 # ClaudeX
 
-**Two AI models argue about your project. You get the blueprint.**
+**Two AI models from different vendors argue through 25 engineering phases until the surviving text becomes one project blueprint — and then build it.**
 
-You give ClaudeX a one-line idea. It walks the project through 25 engineering
-phases — problem definition, dataset, model, security, testing, deployment,
-viva prep — and in every phase:
+You give it one line. Claude drafts a phase, GPT attacks the draft, Claude revises, GPT scores it against a rubric. Authorship alternates every phase, and the critic is always the *other* vendor, because a model reviewing its own output agrees with itself.
 
-1. **One model writes** the section
-2. **A model from a different vendor attacks it** — adversarially, by design
-3. **The author revises**, fixing blockers and rejecting bad notes with reasons
-4. **A judge that didn't write it scores** the result against a fixed rubric
-5. **Below the threshold?** Another round, on a stronger model
-
-The output is `blueprint.md` — a full project specification where every section
-has survived cross-examination — plus an HTML report showing which model wrote
-what, how it scored, and what it cost.
-
-No dependencies. Python 3.10+. Pure standard library.
+Zero third-party dependencies. Python 3.10+ standard library only. Runs on Windows and POSIX, offline against a mock, over subscription CLIs, or over paid APIs.
 
 ---
 
 ## Table of contents
 
-- [Quick start](#quick-start)
-- [Why two vendors](#why-two-vendors)
-- [Works for any project type](#works-for-any-project-type)
-- [Two ways to pay](#two-ways-to-pay)
-- [Automatic model selection](#automatic-model-selection)
-- [Commands](#commands)
-- [What you get](#what-you-get)
-- [The rubric — and what the scores are not](#the-rubric--and-what-the-scores-are-not)
-- [Customising the phases](#customising-the-phases)
-- [Cost control](#cost-control)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [How to make a project](#how-to-make-a-project)
+- [How to run it](#how-to-run-it)
+- [Command reference](#command-reference)
+- [Transports: cli vs api vs offline](#transports-cli-vs-api-vs-offline)
+- [Quota, cost and time](#quota-cost-and-time)
+- [Statistics from real runs](#statistics-from-real-runs)
+- [What you get out](#what-you-get-out)
 - [Troubleshooting](#troubleshooting)
-- [How it's built](#how-its-built)
-- [Limits](#limits)
-- [Security](#security)
+- [Known issues](#known-issues)
 
 ---
 
-## Quick start
+## Requirements
 
-### 1. Try it free, right now
-
-No keys, no setup, no spend. The full pipeline runs against a built-in mock:
-
-```bash
-python -m claudex init "A web app that predicts crop disease from leaf photos"
-```
-
-```bash
-python -m claudex run --offline
-```
-
-You'll watch the debate happen and get a complete `blueprint.md`. The *content*
-is placeholder text — but every moving part is real, so you can see exactly
-what a paid run would produce and what it would cost.
-
-### 2. Check what's configured
-
-```bash
-python -m claudex setup
-```
-
-This tells you what works, what's missing, and the exact command to fix it.
-
-### 3. Run it for real
-
-```bash
-python -m claudex run
-```
-
-> **Windows / PowerShell note:** PowerShell 5.1 doesn't support `&&`. Use `;`
-> to chain commands, or just run them one at a time.
-
----
-
-## Why two vendors
-
-A model reviewing its own draft agrees with itself. That's the core problem
-with single-model planning: it produces confident, well-formatted prose that
-decides nothing and has never been contradicted.
-
-ClaudeX forces disagreement **structurally**, not by asking nicely:
-
-| Mechanism | What it does |
+| | |
 |---|---|
-| **Alternating authorship** | Phase 1 written by Claude, phase 2 by GPT, phase 3 by Claude… Neither model's habits shape the whole document. |
-| **Cross-vendor critique** | The critic is always the *other* vendor, prompted adversarially. Waving a draft through counts as a failed review. |
-| **Independent judging** | The judge didn't write the final text. It scores against a rubric instead of rewriting. |
-| **Dual judge on close calls** | Borderline scores get a second opinion from the opposite vendor, averaged. That's exactly where one model's bias matters most. |
+| Python | 3.10 or newer |
+| Dependencies | none — standard library only |
+| Platform | Windows, macOS, Linux |
+| For `--via cli` | `claude` and `codex` on PATH, both signed in |
+| For `--via api` | `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` in `.env` |
+| For `--offline` | nothing |
 
-**With one key or one CLI**, ClaudeX still runs — it tells you it's degraded to
-self-critique. **With neither**, it runs fully offline against a deterministic
-mock, so you can exercise everything for free before spending anything.
-
----
-
-## Works for any project type
-
-The 25 phases assume a data-driven web app. Most projects aren't that — so
-before writing anything, ClaudeX **profiles your brief and reshapes the
-blueprint**: it drops phases that don't apply, adds domain phases that are
-missing, and annotates the ones that stay with how to read them.
-
-These are real results from four runs:
-
-| Project | Phases dropped | Phases added |
-|---|---|---|
-| Offline Unity puzzle game | dataset, model, recommender, backend, database, API | **Game Design & Core Loop**, **Mobile Platform Constraints** |
-| ESP32 soil sensor firmware | dataset, model, recommender | **Hardware & Power Budget** |
-| Sleep research paper | dataset, model, recommender, scalability, devops, monitoring | **Research Methodology & Reproducibility** |
-| Log-rotation CLI tool | dataset, model, recommender, UI/UX, frontend | — |
-
-The game blueprint came out as **21 phases, not 25**, with game design inserted
-right after feature planning.
-
-Dropping a phase beats letting a model pad it with filler to look thorough.
-
-**Two guardrails** stop a bad profile from wrecking the blueprint: phase 1 can
-never be dropped, and at least five phases always survive.
-
-```bash
-python -m claudex run --no-profile
-```
-
-```bash
-python -m claudex run --reprofile
-```
-
-With keys, a model does the profiling. Offline, a keyword heuristic does it
-less precisely — every row in that table came from the heuristic.
+You need **both** vendors for the tool to do what it exists to do. With one, it still runs — it tells you it has degraded to single-vendor and that the critique is self-critique.
 
 ---
 
-## Two ways to pay
+## Setup
 
-|  | `--via api` | `--via cli` |
-|---|---|---|
-| **Needs** | API keys in `.env` | `claude` / `codex` signed in |
-| **Cost** | ~$7 per full run | nothing — uses your subscription |
-| **Speed** | seconds per call | minutes per call |
-| **Limit** | your credit balance | your plan's rolling usage window |
-
-`--via auto` (the default) prefers API keys and falls back to the CLIs.
-
-### A subscription is not an API key
-
-This trips up almost everyone: **Claude Pro and ChatGPT Plus/Pro do not include
-API access.** The API is billed separately, pay-as-you-go. A valid API key with
-no credits returns:
+### 1. Check what you have
 
 ```
-Your credit balance is too low to access the Anthropic API
-You have no credits remaining
-```
-
-The `cli` transport exists precisely so a subscription *can* be used instead,
-by shelling out to the official CLIs in non-interactive mode.
-
-### Setting up CLI mode
-
-```bash
-claude login
-```
-
-```bash
-npm install -g @openai/codex
-```
-
-```bash
-codex login
-```
-
-Choose **"Sign in with ChatGPT"** — not the API-key option, or you're back to
-needing credits.
-
-```bash
 python -m claudex setup
 ```
 
-### The catch: quota
+This prints exactly which transports are ready and what is missing. Read it before anything else — it is the fastest way to find out you are about to run single-vendor.
 
-A full run is ~200 calls, and subscription plans meter usage in rolling
-windows, so a full run **will** exhaust your quota. ClaudeX handles this
-deliberately:
+Healthy output looks like:
 
-- throttles calls (`cli.delay_between_calls`)
-- caps them per run (`cli.max_calls_per_run`, default 120)
-- warns as you approach the cap
-- saves every completed phase so you resume in the next window
-- detects a spent quota and **stops instead of retrying** — it reads the reset
-  time out of the error and tells you when to come back
+```
+CLI transport  (your subscription)
+  OK claude: claude present (2.1.278 (Claude Code))
+  OK gpt: codex present (0.155.1)
 
-For a subscription run, trim it:
-
-```bash
-python -m claudex run --via cli --phases 1,2,5,6,7,8,10 --rounds 1
+Verdict
+  OK both CLIs ready - cross-vendor debate available
 ```
 
-That's ~28 calls instead of ~200.
+### 2. Sign in to both CLIs
+
+Both open a browser. They cannot be automated.
+
+```
+claude login
+codex login          # choose "Sign in with ChatGPT"
+```
+
+If `claude` is already running as a TUI, the command inside it is `/login` **with the slash** — typing `login` sends it to the model as a prompt.
+
+### 3. Verify the real call paths
+
+Do **not** trust `claudex setup` alone here. It checks that the binaries exist, not that they answer. Test the actual calls:
+
+```
+claude -p "Reply with exactly: AUTH_OK"
+codex exec --skip-git-repo-check -s read-only --ephemeral "Reply with exactly: AUTH_OK"
+```
+
+Both must print `AUTH_OK`. If codex says you hit your usage limit, the window has not rolled over yet.
+
+### 4. Optional — API keys
+
+Only needed for `--via api`. Copy `.env.example` to `.env` and fill in:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+```
+
+A subscription is **not** an API key. Being signed in to Claude or ChatGPT gives you no key; the `cli` transport exists precisely so a subscription can be used instead.
 
 ---
 
-## Automatic model selection
+## How to make a project
 
-Two independent decisions, neither hardcoded anywhere in the code.
+Two routes. Pick by how much control you want.
 
-**Which vendor speaks** — turn-taking, as described above.
+### Route A — one command, start to finish
 
-**How hard it thinks** — each phase carries a `profile`, each role maps that
-profile to a tier, and `config/models.json` maps tiers to actual models:
-
-| Profile | Phases | propose | critique | judge |
-|---|---|---|---|---|
-| `deep` | problem definition, backend, database, dataset, model, security, research, evaluation | deep | deep | balanced |
-| `standard` | UI/UX, frontend, testing, API, DevOps, diagrams, docs | balanced | balanced | balanced |
-| `light` | monitoring, analytics, code quality | fast | balanced | fast |
-
-Security gets the strongest model available. Analytics doesn't. Judging runs
-one tier below authoring, because scoring against a rubric is a much easier job
-than designing — which keeps the bill down without weakening the debate.
-
-**Escalation:** a phase scoring below 70 gets bumped one tier up the ladder
-(`fast → balanced → deep`) for the next round, instead of retrying the same
-model that already failed.
-
-Every routing decision is recorded with its reason in `state.json`.
-
-### Model IDs
-
-`config/models.json` is the single source of truth. Model names change, and a
-wrong name is a 404 at call time — so check before a real run:
-
-```bash
-python -m claudex models --probe
+```
+python -m claudex create "a browser-based 2D arcade space shooter" ^
+  --constraints "solo dev; HTML/CSS/JS; offline-capable; no paid services" ^
+  --via cli --rounds 1 --yes
 ```
 
-That lists each configured model and tells you whether your account can
-actually see it. Edit the JSON; no code changes needed.
+`create` chains everything: profile the idea, debate every surviving phase, assemble the blueprint, then build a runnable product from it. Good when you trust it to go.
+
+### Route B — step by step (recommended the first time)
+
+```
+python -m claudex init "a browser-based 2D arcade space shooter" ^
+  --name "Space Attack" ^
+  --constraints "solo dev; HTML/CSS/JS; offline-capable; no paid services"
+```
+
+`init` creates `runs/<slug>/` with a brief and a phase plan. Nothing is spent yet. Then run the debate, assemble, and build — see below.
+
+### The phase plan
+
+ClaudeX profiles your idea and drops phases that do not apply. It does not run all 25 blindly.
+
+```
+game  ->  23 phases   drops 7, 8 (no ML), 9 (no recommender), adds 26 "Game Design & Core Loop"
+cli   ->  17 phases   drops 3, 4 (no GUI), 5, 6 (no server), 7, 8, 9, 15 (no API)
+```
+
+Use `--no-profile` to force all 25, or `--reprofile` to redo the decision.
 
 ---
 
-## Commands
+## How to run it
+
+### Debate the phases
+
+```
+python -m claudex run --run space-attack --via cli --rounds 1 --yes
+```
+
+Watch the header. It must say **cross-vendor**:
+
+```
+mode:       cross-vendor - authorship alternates across claude, gpt
+transport:  cli
+phases:     23
+quota:      ~92 subscription calls, cap 120
+```
+
+If it says `single-vendor`, one CLI is missing and the critique is worthless as a quality signal. Stop and fix that first.
+
+Each phase then prints who is doing what:
+
+```
+Phase 1: Problem Definition & Requirements  [deep]
+  -> round 1/1 - claude writes, gpt attacks
+     propose   claude:deep      claude-opus-5
+     critique  gpt:deep         gpt-6-astra
+     revise    claude:deep      claude-opus-5
+     judge     gpt:balanced     gpt-5.6-terra
+  -> score 89/100 -> ACCEPT
+```
+
+### Resume after it stops
+
+It **will** stop — subscription windows are the normal failure. Nothing is lost. Completed phases are saved to `state.json` and the response cache keeps finished calls, so the same command picks up where it left off:
+
+```
+python -m claudex run --run space-attack --via cli --rounds 1 --yes
+```
+
+Re-running an accepted phase does nothing unless you pass `--force`.
+
+### Assemble the document
+
+```
+python -m claudex build --run space-attack
+```
+
+Writes `blueprint.md`, `open-questions.md` and `report.html`. Add `--no-summary` to skip the model-written executive summary — useful when you are out of quota, since that summary costs one more call.
+
+### Build the actual product
+
+```
+python -m claudex make --run space-attack --via cli --yes
+```
+
+Turns an accepted blueprint into a runnable product. Pass `--verify-command` to have it run a check you approve (run without a shell, in the product workspace). `--allow-incomplete` builds from a partial blueprint and is not recommended.
+
+### Check where you are
+
+```
+python -m claudex status --run space-attack
+python -m claudex cost   --run space-attack
+python -m claudex runs
+```
+
+---
+
+## Command reference
 
 | Command | What it does |
 |---|---|
-| `setup` | what works, what's missing, how to fix it |
-| `init "<idea>"` | start a new project run |
-| `run` | the debate |
-| `build` | re-assemble outputs without re-debating |
-| `status` | per-phase progress and scores |
+| `init <idea>` | create a run, profile it, write the brief. Spends nothing. |
+| `create <idea>` | init + run + build + make, in one go |
+| `run` | debate the phases |
+| `build` | assemble `blueprint.md` and `report.html` |
+| `make` | build a runnable product from an accepted blueprint |
+| `status` | phase progress and scores |
 | `cost` | token and spend ledger |
 | `models` | model registry and key/CLI check |
 | `runs` | list all runs |
+| `setup` | what is configured and what is missing |
 
-```bash
-python -m claudex init "<idea>" --name Short --constraints "team, deadline, budget"
-```
+**Flags that matter most**
 
-### `run` options
+| Flag | Applies to | Effect |
+|---|---|---|
+| `--run <slug>` | most | which run. **Must come after the subcommand.** |
+| `--via auto\|api\|cli` | run, build, make, create | transport. `auto` prefers keys, falls back to CLIs |
+| `--phases 1-9,12,20` | run | subset instead of all |
+| `--rounds N` | run, create | max debate rounds per phase (default 2) |
+| `--accept-score N` | run, create | rubric score needed to accept (default 80) |
+| `--force` | run | redo phases already accepted |
+| `--offline` | run, build, make, create | deterministic mock, no calls, no spend |
+| `--lead claude\|gpt` | run, make, create | force one author instead of alternating |
+| `--no-dual-judge` | run | skip the second judge on borderline scores |
+| `--yes` / `-y` | run, make, create | skip the confirmation prompt |
 
-| Flag | Meaning |
-|---|---|
-| `--via auto\|api\|cli` | transport: keys, subscription CLIs, or auto |
-| `--phases 1-9,12` | run only these phases |
-| `--rounds 2` | max debate rounds per phase |
-| `--accept-score 80` | rubric score needed to accept a section |
-| `--lead claude\|gpt` | force an author vendor instead of alternating |
-| `--offline` | deterministic mock, no calls, no spend |
-| `--no-profile` | skip profiling, run all 25 phases as-is |
-| `--reprofile` | redo the profiling analysis |
-| `--force` | redo phases already accepted |
-| `--no-dual-judge` | skip second opinions on borderline scores |
-| `--no-cache` | ignore the response cache |
-| `--no-build` | don't assemble afterwards |
-| `-y`, `--yes` | skip the cost confirmation |
-
-### A typical session
-
-Start the project:
-
-```bash
-python -m claudex init "Campus lost-and-found with image matching" --name FindIt --constraints "2 students, 8 weeks, free hosting, must work on 2G"
-```
-
-Free dry run first — see the whole pipeline, spend nothing:
-
-```bash
-python -m claudex run --offline
-```
-
-Real run on the expensive phases, three rounds each:
-
-```bash
-python -m claudex run --phases 1,2,5,6,7,8,10 --rounds 3
-```
-
-Cheap phases at lower effort:
-
-```bash
-python -m claudex run --phases 17,18,23 --rounds 1
-```
-
-Assemble the deliverables:
-
-```bash
-python -m claudex build
-```
-
-Runs are **resumable**. Interrupt at any point; completed phases are saved and
-rerunning skips them. Every response is cached by prompt hash, so a rerun after
-a crash replays for free.
+`--run` is a subcommand-level argument. `claudex --run x run` fails with `invalid choice`; `claudex run --run x` is correct.
 
 ---
 
-## What you get
+## Transports: cli vs api vs offline
 
-```
-runs/<project>/
-├── blueprint.md          ← the deliverable: all sections, provenance, open questions
-├── report.html           ← scores, model attribution, spend
-├── decisions.json        ← every decision ID, choice, rationale, author
-├── open-questions.md     ← what the models couldn't settle without you
-├── summary.json          ← machine-readable run stats
-├── sections/NN-*.md      ← accepted section per phase
-├── transcript/NN-*.json  ← full debate: draft, critique, revision, scores
-└── state.json            ← resumable state + routing ledger
-```
+| | `--via cli` | `--via api` | `--offline` |
+|---|---|---|---|
+| Uses | your Claude / ChatGPT subscription | paid API keys | nothing |
+| Money | none | ~$7 per full run | none |
+| Limited by | rolling usage windows | credit balance | — |
+| Speed | slow — each call spawns an agent loop | fast | instant |
+| Token accounting | **estimated only** | exact | n/a |
+| Repo awareness | yes — the CLI reads your files | no | no |
 
-**The transcripts are the interesting part.** Every critique is preserved, so
-you can read exactly what one model thought was wrong with the other's design —
-and that argument is usually more useful than the polished section it produced.
+One property of `cli` that is easy to miss: `claude -p` and `codex exec` are **agent loops, not single completions**. They read the project directory. That is why a CLI-transport blueprint cites real files and line numbers from your repo, and an API-transport blueprint writes a spec from scratch. Neither is wrong — decide which you want.
 
-`blueprint.md` opens with a provenance table:
-
-| # | Phase | Author | Critic | Rounds | Score |
-|---|---|---|---|---|---|
-| 1 | Problem Definition & Requirements | claude | gpt | 2 | 91 |
-| 2 | Feature Planning | gpt | claude | 2 | 93 |
-| 3 | UI/UX Design | claude | gpt | 2 | 87 |
+On the `cli` transport ClaudeX strips `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the subprocess environment. Otherwise the CLI silently bills your API instead of your subscription, defeating the point.
 
 ---
 
-## The rubric — and what the scores are not
+## Quota, cost and time
 
-Judges score five dimensions 0–100:
+A full run is roughly **5 calls per phase** — propose, critique, revise, judge, summarize — plus a second judge on borderline scores. That is 5× what a single-model tool would spend, by design.
 
-| Dimension | Question it answers |
-|---|---|
-| **coverage** | Is the checklist genuinely addressed, or just name-checked? |
-| **specificity** | Are choices concrete and testable, or hedged? |
-| **consistency** | Does it agree with earlier locked decisions? |
-| **feasibility** | Could the stated team actually build this? |
-| **risk_handling** | Are real failure modes identified with mitigations? |
+Context is re-sent every step: the critique carries the draft, the revise carries the draft *and* the critique, the judge carries the finished section. Inputs are therefore 3–4× the distinct content.
 
-Default accept threshold is 80. A self-reported total that disagrees with its
-own rubric mean by more than 5 points is discarded in favour of the mean —
-models inflate summary scores more readily than individual ones.
+ClaudeX defends against this in `config/models.json`:
 
-### What the scores are not
-
-They measure **how completely and concretely the plan is specified.** They are
-*not* evidence that the plan is correct, that the tech choices suit your
-situation, or that the timeline is realistic.
-
-Two models agreeing is weak evidence — they share training data and failure
-modes. Treat ClaudeX output as a strong first draft that a human must verify,
-especially:
-
-- **any number, benchmark, or citation** — prompts require a `[VERIFY]` tag on
-  unverified claims, so grep for it
-- **dataset licensing and availability**
-- **anything security-related**, before it touches real user data
-
----
-
-## Customising the phases
-
-```bash
-python -m claudex init "..." --write-phases
+```json
+"cli": {
+  "timeout": 600,
+  "delay_between_calls": 2.0,
+  "max_calls_per_run": 120,
+  "warn_after_calls": 40
+}
 ```
 
-That writes all 25 to `config/phases/NN-slug.md` as editable markdown:
+**To spend less**, change `routing` in the same file — move `propose`, `critique` and `revise` from `deep` to `balanced`. That takes the heavy calls off the top-tier model and roughly cuts time and quota by half, at some quality cost.
 
-```markdown
----
-id: 7
-slug: dataset
-title: Dataset Requirements
-profile: deep
-depends_on: 1, 2
+> **`cost` reports $0.00 on the cli transport, and that is not the same as free.**
+> The CLIs report no token usage, so the ledger estimates from the prompt string and the final answer. Everything the agent loop does in between — reading your files, reasoning, tool calls — is counted nowhere. Treat the ledger as a floor, not a measurement.
+
 ---
 
-## Goal
-Define where data comes from and every quality gate it must pass.
+## Statistics from real runs
 
-## Checklist
-- Dataset source
-- Class imbalance
+### Run A — ClaudeX profiling itself, 17 phases, single-vendor
+
+Every score below came from Claude grading Claude, so read them as a measure of the pipeline, not of quality.
+
+```
+16/17 accepted   86 calls   $0.0000
+405,861 tokens in / 231,216 out
+2h 01m of phase time
 ```
 
-Files win over the built-in seed. Add phases, delete them, rewrite checklists,
-change dependencies — `depends_on` drives both execution order and what context
-each phase receives. Cycles and unknown IDs are caught at load time.
+| Phase | Tier | Score | Time |
+|---|---|---|---|
+| 1. Problem Definition | deep | 89 | 12m 01s |
+| 2. Feature Planning | deep | 93 | 1m 12s *(cached)* |
+| 10. Security | deep | 90 | 13m 05s |
+| 11. Testing | standard | 94 | 5m 51s |
+| 12. Edge Cases | standard | 93 | 6m 09s |
+| 13. Performance | standard | 90 | 4m 51s |
+| 14. Scalability | standard | 92 | 5m 08s |
+| 16. DevOps | standard | 93 | 4m 59s |
+| 17. Monitoring | light | **0** *(parse failure — see Known issues)* | 6m 52s |
+| 18. Analytics | light | 83 | 7m 50s |
+| 19. Documentation | standard | 91 | 4m 36s |
+| 20. Diagrams | standard | 88 | 6m 14s |
+| 21. Research | deep | 91 | 9m 42s |
+| 22. Legal & Privacy | standard | 93 | 5m 51s |
+| 23. Code Quality | light | 90 | 5m 54s |
+| 24. Final Evaluation | deep | 93 | 14m 30s |
+| 25. Presentation | standard | 88 | 5m 55s |
+
+**By model**
+
+| Model | Calls | In | Out |
+|---|---|---|---|
+| `claude-opus-5` (deep) | 17 | 97,423 | 116,612 |
+| `claude-sonnet-5` (balanced) | 44 | 209,142 | 88,894 |
+| `claude-haiku-4-5` (fast) | 25 | 99,296 | 25,710 |
+
+**By tier — plan your time with these**
+
+| Tier | Phases | Average |
+|---|---|---|
+| deep | 4 | **12m 20s** |
+| standard | 9 | **5m 30s** |
+| light | 3 | **6m 52s** |
+
+Note the anomaly: **`light` phases were slower than `standard`**. The light profile routes `propose` to the fast model but `critique` to balanced, and the cheap model's longer, looser drafts cost more time downstream than they save. The tier names describe cost, not speed.
+
+### Run B — Space Attack, cross-vendor
+
+The configuration that actually demonstrates the idea:
+
+```
+propose    claude:deep      claude-opus-5
+critique   gpt:deep         gpt-6-astra
+revise     claude:deep      claude-opus-5
+judge      gpt:balanced     gpt-5.6-terra
+score 89/100   author=claude  critic=gpt
+coverage 94 | specificity 93 | consistency 84 | feasibility 84 | risk_handling 91
+```
+
+### Output size
+
+A 17-phase blueprint came to **347 KB** across 17 sections, with a 17-file JSON transcript of every exchange and 14 logged open questions. Individual sections ran 20–57 KB.
 
 ---
 
-## Cost control
+## What you get out
 
-| Technique | Effect |
-|---|---|
-| `--offline` | costs nothing, exercises the full pipeline |
-| `--via cli` | uses your subscription instead of credits |
-| `--phases` | spend deeply only where it matters |
-| `--rounds 1` | roughly halves the calls |
-| `--no-dual-judge` | skips second opinions |
-| disk cache | reruns are free |
+```
+runs/<slug>/
+  brief.md              your idea and constraints
+  state.json            phase status, scores, ledger — the resume point
+  sections/NN-slug.md   one accepted section per phase
+  transcript/NN-slug.json   every propose/critique/revise/judge exchange
+  blueprint.md          all sections assembled
+  open-questions.md     what the debate could not settle
+  report.html           scores and model attribution, open in a browser
+  decisions.json        every numbered decision, extracted
+  summary.json          run-level totals
+```
 
-`run` prints a worst-case estimate and asks before spending. `claudex cost`
-breaks spend down per model.
-
-Offline runs price mock traffic at real rates using typical response sizes, so
-the figure is a usable forecast — and it's labelled as an estimate everywhere
-it appears.
+`open-questions.md` is the most underrated file. It is where the critic flagged something the author could not resolve — read it before you start building.
 
 ---
 
@@ -431,85 +366,31 @@ it appears.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `The token '&&' is not a valid statement separator` | PowerShell 5.1 | Use `;`, or run commands separately |
-| `Your credit balance is too low` | Valid key, no credits | Add credits, or use `--via cli` |
-| `You have no credits remaining` | Same, OpenAI side | Same |
-| `OAuth session expired` | CLI not signed in | `claude login` |
-| `You've hit your usage limit` | Subscription quota spent | Wait for the reset time ClaudeX prints, or `--via api` |
-| `NOT in the account's model list` | Wrong model ID | Edit `config/models.json` |
-| `'claude' is not on PATH` | CLI not installed | Install it, or use `--via api` |
-| Blueprint full of "Placeholder decision" | Ran offline | Configure a transport — run `claudex setup` |
+| `invalid choice: 'x'` on `--run` | `--run` placed before the subcommand | `claudex run --run x`, not `claudex --run x run` |
+| `Login expired · Please run /login` | TUI session expired | type `/login` **with the slash** |
+| `You've hit your session limit` | subscription window spent | wait for the printed reset time, or `--via api` |
+| `'codex' is not on PATH` | CLI not installed | `npm install -g @openai/codex`, then `codex login` |
+| `single-vendor` in the header | one CLI missing or signed out | fix it — the scores mean nothing otherwise |
+| `Your credit balance is too low` | valid key, no credits | add credits, or `--via cli` |
+| Phase scores `0/100` | judge reply did not parse | check `parsed` in the transcript; rerun with `--force` |
+| Blocked network in a sandbox | egress policy | the CLIs need `api.anthropic.com` and `api.openai.com` |
 
 ---
 
-## How it's built
+## Known issues
 
-```
-claudex/
-├── cli.py            # commands
-├── router.py         # which model, which tier, and why
-├── debate.py         # propose → critique → revise → judge
-├── prompts.py        # role prompts — edit these to change debate quality
-├── profiler.py       # reshapes the blueprint to the project's domain
-├── phases.py         # load / write / order phases
-├── phases_seed.py    # the 25 phases
-├── assembler.py      # sections → blueprint.md
-├── report.py         # HTML report
-├── state.py          # resumable state + cost ledger
-├── util.py           # JSON extraction, retry, console
-└── providers/
-    ├── anthropic_api.py   # Anthropic Messages API
-    ├── openai_api.py      # OpenAI Chat Completions
-    ├── cli_api.py         # subscription transport (claude -p, codex exec)
-    └── mock.py            # deterministic offline provider
-```
+**1. A successful answer can be misread as an exhausted quota.**
 
-`prompts.py` is where output quality actually lives. If sections come out
-vague, tighten the house rules there before touching anything else.
+`providers/cli_api.py` scanned the model's own answer for `QUOTA_EXHAUSTED` tokens, which include the bare word `"quota"`. Any section discussing subscription tooling, or a browser game's `QuotaExceededError` from `localStorage`, triggered a non-retryable `QuotaExhausted` and killed the run on a call that had actually succeeded.
 
-### Tests
+Fixed by gating body-text scanning on `returncode != 0 or len(answer) <= ERROR_TEXT_MAX` — a real CLI error is short, a blueprint section is not. The same reasoning applies to the `AUTH_FAILURE` check, which previously read `answer[:300]` unconditionally.
 
-```bash
-python -m unittest discover -s tests -v
-```
+**2. A judge parse failure is recorded as a score of 0.**
 
-74 tests covering JSON extraction from messy model output, judge-score
-sanitising, routing and escalation, phase dependency ordering, markdown
-round-tripping, caching, resume, a full offline end-to-end run, both
-transports, CLI auth and quota error handling, Windows shim resolution, call
-capping, and profiler reshaping across game, firmware, research and CLI
-projects.
+When the judge's reply does not match the rubric format, every dimension defaults to `0.0` and the phase is kept with `verdict: ITERATE`. The transcript records `parsed: False`, but `report.html` shows `0/100` — indistinguishable from a genuinely bad section. Seen once in 17 phases, on a `fast`-tier judge. Check `parsed` before believing a zero.
 
----
+**3. `"session limit"` is not in `QUOTA_EXHAUSTED`.**
 
-## Limits
+The table matches `"usage limit"` but not `"session limit"`, so that genuine quota stop surfaces as a generic `failed (exit 1)` and skips the reset-time guidance.
 
-- **Phases run sequentially.** The dependency graph would allow parallelism;
-  it isn't implemented.
-- **A full 25-phase run at 2 rounds is ~200 model calls.** Estimate first.
-- **Two vendors only.** A third would make the judge genuinely neutral rather
-  than merely not-the-author.
-- **The judge sees the section, not the debate.** It can't tell whether a
-  critique was answered or dodged.
-- **No web access**, so the research phase relies on training data. That's why
-  it's prompted to tag claims `[VERIFY]` rather than cite.
-- **The CLI transport reports no token usage**, so its ledger figures are
-  estimates and its cost column is always zero.
-- **The offline profiler is keyword-based** and will misread an unusual brief.
-  Check what it dropped before a paid run; `--no-profile` disables it.
-
----
-
-## Security
-
-`.env` is gitignored and holds your keys. Never commit it, and never paste an
-API key into a chat or an issue — a leaked key is billable by whoever finds it.
-If one leaks, revoke it at
-[console.anthropic.com](https://console.anthropic.com) or
-[platform.openai.com/api-keys](https://platform.openai.com/api-keys).
-
-On the CLI transport, ClaudeX **strips `ANTHROPIC_API_KEY` and
-`OPENAI_API_KEY` from the subprocess environment** — otherwise the CLI silently
-bills your API instead of the subscription, defeating the point. Codex also
-runs with `--sandbox read-only`, so it can't modify files while writing your
-blueprint.
+**4. The `cli` ledger cannot measure what it reports.** See [Quota, cost and time](#quota-cost-and-time).

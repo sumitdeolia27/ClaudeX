@@ -16,6 +16,7 @@ from claudex.phases import (  # noqa: E402
     execution_order, load_phases, parse_selection, write_phase_files,
 )
 from claudex.providers import ProviderPool  # noqa: E402
+from claudex.product import ProductEngine, safe_product_path  # noqa: E402
 from claudex.router import Router  # noqa: E402
 from claudex.state import Run  # noqa: E402
 from claudex.util import extract_json, slugify, strip_json_blocks  # noqa: E402
@@ -43,6 +44,16 @@ class TestUtil(unittest.TestCase):
 
     def test_strip_json_blocks(self):
         self.assertEqual(strip_json_blocks('keep\n```json\n{"x":1}\n```'), "keep")
+
+    def test_product_paths_stay_inside_workspace(self):
+        root = Path(tempfile.mkdtemp())
+        try:
+            self.assertEqual(safe_product_path(root, "src/app.js"), root / "src" / "app.js")
+            for unsafe in ("../secret", "/etc/passwd", "C:\\secret.txt", "a/../../b"):
+                with self.assertRaises(Exception):
+                    safe_product_path(root, unsafe)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class TestJudgeParsing(unittest.TestCase):
@@ -271,6 +282,22 @@ class TestEndToEndOffline(unittest.TestCase):
         run, _, _, _ = self._run_phases([1], rounds=1)
         self.assertIn(run.phase(1)["status"], {"accepted", "needs_work"})
         self.assertEqual(run.phase(1)["rounds"], 1)
+
+    def test_product_engine_builds_resumable_workspace(self):
+        from claudex.util import Console, write_text
+
+        run = Run.create(self.settings, "Product Test", "Build a tiny product.")
+        write_text(run.dir / "blueprint.md", "# Product Test\n\nAccepted blueprint.")
+        router = Router(REGISTRY, offline=True)
+        pool = ProviderPool(REGISTRY, self.settings, offline=True)
+        engine = ProductEngine(run, router, pool, REGISTRY, Console(quiet=True))
+        result = engine.build()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(run.data["product"]["status"], "complete")
+        self.assertTrue((run.dir / "product" / "README.md").exists())
+        calls = len(run.data["ledger"])
+        engine.build()
+        self.assertEqual(len(run.data["ledger"]), calls, "accepted tasks should resume without calls")
 
 
 class TestRegistry(unittest.TestCase):

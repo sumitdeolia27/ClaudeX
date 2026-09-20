@@ -81,7 +81,7 @@
       "tiers": {
         "deep": {
           "model": "gpt-5.5-pro",
-          "cli_model": "gpt-5.5-codex",
+          "cli_model": "gpt-6-astra",
           "max_tokens": 8000,
           "price_in": 20.0,
           "price_out": 80.0,
@@ -89,7 +89,7 @@
         },
         "balanced": {
           "model": "gpt-5.5",
-          "cli_model": "gpt-5.5-codex",
+          "cli_model": "gpt-5.6-terra",
           "max_tokens": 8000,
           "price_in": 1.25,
           "price_out": 10.0,
@@ -97,7 +97,7 @@
         },
         "fast": {
           "model": "gpt-5.4-mini",
-          "cli_model": "gpt-5.4-codex-mini",
+          "cli_model": "gpt-5.6-luna",
           "max_tokens": 4000,
           "price_in": 0.25,
           "price_out": 2.0,

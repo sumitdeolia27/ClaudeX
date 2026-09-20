@@ -38,10 +38,6 @@ TRANSIENT = (
     "temporarily", "try again", "connection", "econnreset", "socket hang up",
 )
 
-# Longest output still plausible as a CLI error message rather than an answer.
-# Above this, body text is treated as content and never as a diagnostic.
-ERROR_TEXT_MAX = 600
-
 # Text that means the user must act - retrying will never help.
 AUTH_FAILURE = (
     "oauth", "not authenticated", "unauthenticated", "log in", "login",
@@ -193,19 +189,7 @@ class CLIProvider(Provider):
 
         # These CLIs report failure on stdout with exit code 0 often enough that
         # the text has to be inspected either way.
-        #
-        # But the ANSWER is content, not diagnostics. A blueprint about
-        # subscription tooling says "quota"; a security phase says "login" and
-        # "credential"; a testing phase says "timeout" and "429". Scanning a
-        # successful answer for those tokens turns the model's own prose into a
-        # fake outage - and QuotaExhausted is non-retryable, so it kills the run.
-        # Real CLI failure messages are short, so only let body text act as a
-        # diagnostic when the call failed or the output is too short to be an answer.
-        diagnostic = stderr.lower()
-        if proc.returncode != 0 or len(answer) <= ERROR_TEXT_MAX:
-            diagnostic = f"{stderr}\n{stdout}\n{answer}".lower()
-
-        combined = diagnostic
+        combined = f"{stderr}\n{stdout}\n{answer}".lower()
         quota_hit = any(token in combined for token in QUOTA_EXHAUSTED)
         if proc.returncode != 0 or not answer or quota_hit:
             detail = stderr or stdout or answer or "(no output)"
@@ -227,11 +211,7 @@ class CLIProvider(Provider):
                 f"{self.exe_name} failed (exit {proc.returncode}): {detail[:400]}"
             )
 
-        # Same reasoning as above: a real "not signed in" message is short. A
-        # 30k-character section that happens to discuss login flows is not one.
-        if len(answer) <= ERROR_TEXT_MAX and any(
-            token in answer.lower()[:300] for token in AUTH_FAILURE
-        ):
+        if any(token in answer.lower()[:300] for token in AUTH_FAILURE):
             raise ProviderError(
                 f"{self.exe_name} is not signed in: {answer[:200]}\n"
                 f"Fix it by running:  {self.login_hint}"
