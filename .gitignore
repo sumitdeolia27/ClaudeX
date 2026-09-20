@@ -1,0 +1,11 @@
+# secrets - never commit these
+.env
+.env.*
+!.env.example
+
+# generated
+runs/
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
