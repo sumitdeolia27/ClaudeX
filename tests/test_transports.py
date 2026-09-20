@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +17,7 @@ from claudex.config import ModelRegistry, Settings  # noqa: E402
 from claudex.phases import execution_order, load_phases  # noqa: E402
 from claudex.providers import ProviderPool, QuotaExceeded  # noqa: E402
 from claudex.providers.base import ProviderError  # noqa: E402
+from claudex.util import estimate_tokens  # noqa: E402
 
 SETTINGS = Settings()
 PHASES = load_phases(SETTINGS)
@@ -89,6 +93,12 @@ class TestTransportResolution(unittest.TestCase):
 class TestCLIProvider(unittest.TestCase):
     def setUp(self):
         self.registry = ModelRegistry.load(SETTINGS, transport="cli")
+        # The CLI agents READ their working directory, so it has to be set.
+        self.project_dir = Path(tempfile.mkdtemp())
+        self.registry.set_cli_cwd(self.project_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.project_dir, ignore_errors=True)
 
     def _provider(self):
         from claudex.providers.cli_api import CLIProvider
@@ -126,6 +136,62 @@ class TestCLIProvider(unittest.TestCase):
         self.assertEqual(out.text, "FINAL ANSWER")
         self.assertIn("--skip-git-repo-check", seen["argv"])
         self.assertIn("read-only", seen["argv"], "codex must not be able to edit files")
+
+    def test_agent_runs_in_the_project_dir_not_the_claudex_repo(self):
+        """Regression: cwd used to fall back to os.getcwd(), i.e. ClaudeX itself.
+
+        `claude -p` and `codex exec` read their working directory, so that
+        fallback made every blueprint cite ClaudeX's own source tree instead of
+        the project being planned.
+        """
+        provider = self._provider()
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["cwd"] = kwargs.get("cwd")
+            return mock.Mock(returncode=0, stdout="answer text", stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            provider.complete("s", [{"role": "user", "content": "q"}], "fast")
+
+        self.assertEqual(Path(seen["cwd"]), self.project_dir.resolve())
+        self.assertNotEqual(
+            Path(seen["cwd"]), Path(os.getcwd()).resolve(),
+            "the agent must not silently read whatever directory claudex was run from",
+        )
+
+    def test_unset_project_dir_is_refused_rather_than_guessed(self):
+        provider = self._provider()
+        self.registry.set_cli_cwd(None)
+        with mock.patch("subprocess.run") as runner:
+            with self.assertRaises(ProviderError) as ctx:
+                provider.complete("s", [{"role": "user", "content": "q"}], "fast")
+        runner.assert_not_called()
+        self.assertIn("project directory", str(ctx.exception).lower())
+
+    def test_output_tokens_are_estimated_from_the_answer_not_the_transcript(self):
+        """Regression: tokens_out measured stdout, but with -o the answer is a file."""
+        from claudex.providers.cli_api import CLIProvider
+        with mock.patch("shutil.which", return_value="/usr/bin/codex"):
+            provider = CLIProvider("gpt", self.registry)
+
+        answer = "REAL ANSWER " * 50
+        transcript = "noisy agent reasoning log " * 500
+
+        def fake_run(argv, **kwargs):
+            with open(argv[argv.index("-o") + 1], "w", encoding="utf-8") as handle:
+                handle.write(answer)
+            return mock.Mock(returncode=0, stdout=transcript, stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            out = provider.complete("s", [{"role": "user", "content": "q"}], "fast")
+
+        # the provider strips the file it reads, so compare like for like
+        self.assertEqual(out.tokens_out, estimate_tokens(answer.strip()))
+        self.assertLess(
+            out.tokens_out, estimate_tokens(transcript),
+            "the ledger must not bill the agent transcript as output",
+        )
 
     def test_missing_executable_is_a_clear_error(self):
         from claudex.providers.cli_api import CLIProvider

@@ -248,9 +248,23 @@ Score it now."""
 
 SUMMARIZE_SYSTEM = """\
 Compress the section below into the smallest text that lets a later phase build
-on it correctly. Keep every decision ID, every number, every named technology,
-and every constraint. Drop all rationale, prose, and risk discussion.
-Output plain bullets, no preamble, 200 words maximum."""
+on it correctly - and, where it disagrees, argue with it.
+
+Keep, without exception:
+  - every decision ID, with a SHORT reason attached. A later phase may
+    overturn a decision, but it can only judge that honestly if it can see
+    why the decision was made. `D1.4: no enterprise tier - solo-dev budget`
+    is useful; `D1.4: no enterprise tier` is an order it cannot evaluate.
+  - every number, threshold, version and named technology
+  - every hard constraint
+  - any risk the section flagged as unresolved
+
+Drop: narrative prose, restated context, worked examples, and anything the
+brief already states.
+
+Write readable clauses, not telegraphic shorthand - a later model has to
+parse this without the original in front of it. One bullet per decision,
+no preamble, 350 words maximum."""
 
 
 def summarize(phase: dict, section: str) -> tuple[str, list[dict]]:

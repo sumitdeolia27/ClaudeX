@@ -108,7 +108,7 @@
     }
   },
   "routing": {
-    "_comment": "role + phase profile -> tier",
+    "_comment": "role + phase profile -> tier. Two roles are deliberately not cheap: `summarize`, because its output is the only view later phases get of an accepted section, and `judge`, because a judge below the author's tier cannot meaningfully reject its work.",
     "propose": {
       "deep": "deep",
       "standard": "balanced",
@@ -125,13 +125,13 @@
       "light": "fast"
     },
     "judge": {
-      "deep": "balanced",
+      "deep": "deep",
       "standard": "balanced",
       "light": "fast"
     },
     "summarize": {
-      "deep": "fast",
-      "standard": "fast",
+      "deep": "balanced",
+      "standard": "balanced",
       "light": "fast"
     },
     "assemble": {
@@ -155,10 +155,10 @@
     ]
   },
   "cli": {
-    "_comment": "Subscription transport. Calls cost no money but are metered by your plan, so they are throttled and capped.",
+    "_comment": "Subscription transport. Calls cost no money but are metered by your plan, so they are throttled and capped. max_calls_per_run is a runaway-loop safety net, not a budget: it is sized so the documented defaults (25 phases at --rounds 2, worst case 250 calls) can actually finish. `claudex run` prints the projection before spending anything.",
     "timeout": 600,
     "delay_between_calls": 2.0,
-    "max_calls_per_run": 120,
+    "max_calls_per_run": 260,
     "warn_after_calls": 40
   }
 }

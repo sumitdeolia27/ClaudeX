@@ -5,16 +5,17 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 
 from . import assembler, profiler, report
 from .config import ModelRegistry, Settings, load_dotenv
-from .debate import DebateEngine
+from .debate import DebateEngine, projected_calls
 from .phases import execution_order, load_phases, parse_selection, write_phase_files
 from .providers import ProviderError, ProviderPool, QuotaExceeded
 from .product import ProductEngine
 from .router import Router
 from .state import Run
-from .util import Console, human_duration
+from .util import Console, human_duration, score_text
 
 BANNER = "ClaudeX - two models argue, you get the blueprint"
 
@@ -50,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--accept-score", type=float, default=80.0)
     create.add_argument("--lead", default="alternate")
     create.add_argument("--via", choices=["auto", "api", "cli"], default="auto")
+    create.add_argument("--project-dir", default="",
+                      help="directory the CLI transport's agent reads while planning. Point it at the codebase you are designing for. Defaults to the run's own directory, NOT the ClaudeX repo.")
     create.add_argument("--offline", action="store_true")
     create.add_argument("--verify-command", default="",
                         help="human-approved command run without a shell in the product workspace")
@@ -74,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--reprofile", action="store_true",
                      help="re-run project profiling even if a plan already exists")
     run.add_argument("--no-cache", action="store_true")
+    run.add_argument("--project-dir", default="",
+                     help="directory the CLI transport's agent reads while planning. Point it at the codebase you are designing for. Defaults to the run's own directory, NOT the ClaudeX repo.")
     run.add_argument("--no-dual-judge", action="store_true",
                      help="skip the second judge on borderline scores")
     run.add_argument("--force", action="store_true", help="redo phases already accepted")
@@ -86,10 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--via", choices=["auto", "api", "cli"], default="auto")
     build.add_argument("--no-summary", action="store_true",
                        help="skip the model-written executive summary")
+    build.add_argument("--project-dir", default="",
+                       help="directory the CLI transport's agent reads (the "
+                            "executive summary is a model call). Defaults to "
+                            "the run's own directory.")
 
     make = sub.add_parser("make", help="build a runnable product from an accepted blueprint")
     _common(make)
     make.add_argument("--via", choices=["auto", "api", "cli"], default="auto")
+    make.add_argument("--project-dir", default="",
+                      help="directory the CLI transport's agent reads while planning. Point it at the codebase you are designing for. Defaults to the run's own directory, NOT the ClaudeX repo.")
     make.add_argument("--offline", action="store_true")
     make.add_argument("--lead", default="alternate")
     make.add_argument("--verify-command", default="",
@@ -153,6 +164,7 @@ def cmd_create(args, settings, console) -> int:
         accept_score=args.accept_score, lead=args.lead, via=args.via,
         offline=args.offline, no_profile=False, reprofile=False, no_cache=False,
         no_dual_judge=False, force=False, yes=args.yes, no_build=False,
+        project_dir=args.project_dir,
     )
     result = cmd_run(run_args, settings, console)
     if result:
@@ -161,7 +173,7 @@ def cmd_create(args, settings, console) -> int:
         run_slug=run.slug, quiet=args.quiet, via=args.via, offline=args.offline,
         lead=args.lead, verify_command=args.verify_command,
         allow_incomplete=False, force_plan=False, force_tasks=False,
-        no_cache=False, yes=args.yes,
+        no_cache=False, yes=args.yes, project_dir=args.project_dir,
     )
     return cmd_make(make_args, settings, console)
 
@@ -182,6 +194,28 @@ def _estimate(registry, router, phases, rounds) -> float:
                 tier = router.tier_for(role, profile)
                 total += registry.price(vendor, tier, EST_IN, EST_OUT)
     return total
+
+
+def pin_project_dir(registry, run, requested: str, transport: str, offline: bool,
+                    console) -> None:
+    """Decide which directory the vendor CLIs run in, and say it out loud.
+
+    `claude -p` and `codex exec` read their working directory, so this choice
+    decides which source tree ends up quoted in the blueprint. Defaulting to
+    os.getcwd() silently pointed every run at the ClaudeX repo itself, so the
+    default is now the run's own directory and anything else is explicit.
+    """
+    if requested:
+        target = Path(requested).expanduser().resolve()
+        if not target.is_dir():
+            raise SystemExit(f"--project-dir does not exist: {target}")
+    else:
+        target = run.dir.resolve()
+    registry.set_cli_cwd(target)
+    if transport == "cli" and not offline:
+        console.say(f"  reading:  {target}")
+        if not requested:
+            console.dim("pass --project-dir to point the agents at an existing codebase")
 
 
 def resolve_transport(requested: str, registry, console) -> tuple[str, bool]:
@@ -223,6 +257,7 @@ def cmd_run(args, settings, console) -> int:
     registry = ModelRegistry.load(settings, transport=transport)
 
     run = Run.load(settings, args.run_slug)
+    pin_project_dir(registry, run, args.project_dir, transport, offline, console)
     router = Router(registry, lead=args.lead, offline=offline)
     pool = ProviderPool(registry, settings, offline=offline, console=console)
 
@@ -258,11 +293,24 @@ def cmd_run(args, settings, console) -> int:
     console.say(f"  rounds:   up to {args.rounds}, accept at {args.accept_score:.0f}/100")
 
     if not offline and transport == "cli":
-        calls = len(ordered) * args.rounds * 4
-        console.say(f"  quota:    ~{calls} subscription calls, cap "
-                    f"{pool.max_calls} (config/models.json)")
-        console.warn("Subscription plans meter usage in rolling windows. A large run "
-                     "can exhaust your quota - consider --phases and --rounds 1.")
+        typical, worst = projected_calls(
+            len(ordered), args.rounds, dual_judge=not args.no_dual_judge
+        )
+        console.say(f"  quota:    ~{typical} calls typical, {worst} worst case, "
+                    f"cap {pool.max_calls} (config/models.json)")
+        if worst > pool.max_calls:
+            per_phase = max(1, worst // max(1, len(ordered)))
+            fits = pool.max_calls // per_phase
+            console.warn(
+                f"This run can exceed the {pool.max_calls}-call cap and would stop "
+                f"around phase {fits} of {len(ordered)}."
+            )
+            console.warn(
+                f"Either raise cli.max_calls_per_run in config/models.json, or run "
+                f"--rounds 1, or --phases 1-{max(1, fits)} and resume afterwards."
+            )
+        console.warn("Subscription plans meter usage in rolling windows. Finished "
+                     "phases are saved, so a stop mid-run costs you nothing.")
         checks = pool.preflight(router.live)
         for vendor, status in checks.items():
             (console.err if status.startswith("FAILED") else console.dim)(
@@ -335,6 +383,8 @@ def cmd_build(args, settings, console) -> int:
     offline = offline or args.offline
     registry = ModelRegistry.load(settings, transport=transport)
     run = Run.load(settings, args.run_slug)
+    pin_project_dir(registry, run, getattr(args, "project_dir", ""), transport,
+                    offline, console)
     router = Router(registry, offline=offline)
     pool = ProviderPool(registry, settings, offline=offline, console=console)
     _do_build(
@@ -361,6 +411,7 @@ def cmd_make(args, settings, console) -> int:
             f"({', '.join(str(pid) for pid in pending)}). Resume `claudex run` first."
         )
         return 2
+    pin_project_dir(registry, run, args.project_dir, transport, offline, console)
     router = Router(registry, lead=args.lead, offline=offline)
     pool = ProviderPool(registry, settings, offline=offline, console=console)
     console.head(f"Building product for {run.name}")
@@ -406,7 +457,7 @@ def cmd_status(args, settings, console) -> int:
         detail = ""
         if status:
             detail = (
-                f"{meta.get('score', 0):>3.0f}/100  "
+                f"{score_text(meta.get('score'), 3)}/100  "
                 f"{meta.get('rounds', 0)}r  "
                 f"{meta.get('author', '?')} vs {meta.get('critic', '?')}"
             )

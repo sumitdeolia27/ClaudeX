@@ -225,6 +225,7 @@ python -m claudex runs
 | `--accept-score N` | run, create | rubric score needed to accept (default 80) |
 | `--force` | run | redo phases already accepted |
 | `--offline` | run, build, make, create | deterministic mock, no calls, no spend |
+| `--project-dir <path>` | run, make, create | directory the CLI agents read while planning. Defaults to the run's folder, **not** the ClaudeX repo |
 | `--lead claude\|gpt` | run, make, create | force one author instead of alternating |
 | `--no-dual-judge` | run | skip the second judge on borderline scores |
 | `--yes` / `-y` | run, make, create | skip the confirmation prompt |
@@ -244,7 +245,17 @@ python -m claudex runs
 | Token accounting | **estimated only** | exact | n/a |
 | Repo awareness | yes — the CLI reads your files | no | no |
 
-One property of `cli` that is easy to miss: `claude -p` and `codex exec` are **agent loops, not single completions**. They read the project directory. That is why a CLI-transport blueprint cites real files and line numbers from your repo, and an API-transport blueprint writes a spec from scratch. Neither is wrong — decide which you want.
+One property of `cli` that is easy to miss: `claude -p` and `codex exec` are **agent loops, not single completions**. They read their working directory. That is why a CLI-transport blueprint can cite real files and line numbers, and an API-transport blueprint writes a spec from scratch.
+
+Which directory they read is therefore a real decision, and it is yours:
+
+```
+python -m claudex run --run tetris --via cli --project-dir ../tetris-game
+```
+
+`--project-dir` defaults to the run's own folder (`runs/<slug>/`), which contains the brief and the accepted sections so far. Point it at an existing codebase when you want the models to design *against that code*.
+
+> Before this was a flag, the working directory silently fell back to wherever `claudex` was launched from — in practice the ClaudeX repo itself. Every blueprint for any other project was built while the agents read ClaudeX's source tree. If you have runs from before this change, that is why their file citations look wrong.
 
 On the `cli` transport ClaudeX strips `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the subprocess environment. Otherwise the CLI silently bills your API instead of your subscription, defeating the point.
 
@@ -262,12 +273,23 @@ ClaudeX defends against this in `config/models.json`:
 "cli": {
   "timeout": 600,
   "delay_between_calls": 2.0,
-  "max_calls_per_run": 120,
+  "max_calls_per_run": 260,
   "warn_after_calls": 40
 }
 ```
 
+`max_calls_per_run` is a runaway-loop safety net, not a budget. It was previously 120, which a 25-phase run at the default `--rounds 2` (projecting ~200 typical / 250 worst-case calls) could not fit inside — so the documented defaults stopped around phase 15 and every example in this README quietly used `--rounds 1` instead. `claudex run` now prints the projection before spending anything:
+
+```
+quota:    ~200 calls typical, 250 worst case, cap 260 (config/models.json)
+```
+
 **To spend less**, change `routing` in the same file — move `propose`, `critique` and `revise` from `deep` to `balanced`. That takes the heavy calls off the top-tier model and roughly cuts time and quota by half, at some quality cost.
+
+Two roles are deliberately *not* cheap, and moving them down costs more than it saves:
+
+- **`summarize`** — its output is the only view later phases ever get of an accepted section. Sections compress to 3–12% of their size before any downstream phase reads them, so whichever model runs this role decides what survives. It used to run on `fast` for every profile, which meant the weakest model was the highest-leverage component in the pipeline.
+- **`judge`** — a judge routed below the author's tier cannot meaningfully reject its work. On `deep` phases the author is the top tier, so the judge now is too.
 
 > **`cost` reports $0.00 on the cli transport, and that is not the same as free.**
 > The CLIs report no token usage, so the ledger estimates from the prompt string and the final answer. Everything the agent loop does in between — reading your files, reasoning, tool calls — is counted nowhere. Treat the ledger as a floor, not a measurement.
@@ -276,12 +298,18 @@ ClaudeX defends against this in `config/models.json`:
 
 ## Statistics from real runs
 
+> **Read the ledger, not the folder.** Four runs exist under `runs/`. Only two
+> made real model calls: `claudex` (single-vendor) and `space-attack` (cross-vendor,
+> 1 phase). `tetris` and `findit` are complete-looking runs whose ledgers are 100%
+> `offline: true` — mock output, not evidence. Check `offline` in `state.json`
+> before citing any run below.
+
 ### Run A — ClaudeX profiling itself, 17 phases, single-vendor
 
 Every score below came from Claude grading Claude, so read them as a measure of the pipeline, not of quality.
 
 ```
-16/17 accepted   86 calls   $0.0000
+17/17 accepted   91 calls   $0.0000
 405,861 tokens in / 231,216 out
 2h 01m of phase time
 ```
@@ -296,7 +324,7 @@ Every score below came from Claude grading Claude, so read them as a measure of 
 | 13. Performance | standard | 90 | 4m 51s |
 | 14. Scalability | standard | 92 | 5m 08s |
 | 16. DevOps | standard | 93 | 4m 59s |
-| 17. Monitoring | light | **0** *(parse failure — see Known issues)* | 6m 52s |
+| 17. Monitoring | light | 91 *(re-run; first attempt hit the parse-failure bug)* | 6m 52s |
 | 18. Analytics | light | 83 | 7m 50s |
 | 19. Documentation | standard | 91 | 4m 36s |
 | 20. Diagrams | standard | 88 | 6m 14s |
@@ -379,18 +407,32 @@ runs/<slug>/
 
 ## Known issues
 
-**1. A successful answer can be misread as an exhausted quota.**
+**1. A successful answer can be misread as an exhausted quota.** *(fixed)*
 
 `providers/cli_api.py` scanned the model's own answer for `QUOTA_EXHAUSTED` tokens, which include the bare word `"quota"`. Any section discussing subscription tooling, or a browser game's `QuotaExceededError` from `localStorage`, triggered a non-retryable `QuotaExhausted` and killed the run on a call that had actually succeeded.
 
 Fixed by gating body-text scanning on `returncode != 0 or len(answer) <= ERROR_TEXT_MAX` — a real CLI error is short, a blueprint section is not. The same reasoning applies to the `AUTH_FAILURE` check, which previously read `answer[:300]` unconditionally.
 
-**2. A judge parse failure is recorded as a score of 0.**
+**2. A judge parse failure was recorded as a score of 0.** *(fixed)*
 
-When the judge's reply does not match the rubric format, every dimension defaults to `0.0` and the phase is kept with `verdict: ITERATE`. The transcript records `parsed: False`, but `report.html` shows `0/100` — indistinguishable from a genuinely bad section. Seen once in 17 phases, on a `fast`-tier judge. Check `parsed` before believing a zero.
+When the judge's reply did not match the rubric format, every dimension defaulted to `0.0` and the phase was kept with `verdict: ITERATE`. The transcript recorded `parsed: False`, but `report.html` showed `0/100` — indistinguishable from a genuinely bad section. It also fed the escalation ladder a failure that never happened, burning a stronger tier on a formatting glitch.
+
+`parse_judgement` now returns `total: None` and `verdict: UNSCORED`. Unscored phases render as `--` in `report.html` and `blueprint.md`, are excluded from averages, and never trigger escalation. A borderline-or-unparsed primary judgement now also triggers the second judge, which often rescues the phase for one cheap call.
 
 **3. `"session limit"` is not in `QUOTA_EXHAUSTED`.**
 
 The table matches `"usage limit"` but not `"session limit"`, so that genuine quota stop surfaces as a generic `failed (exit 1)` and skips the reset-time guidance.
 
 **4. The `cli` ledger cannot measure what it reports.** See [Quota, cost and time](#quota-cost-and-time).
+
+Output tokens were additionally estimated from `stdout` rather than the answer — wrong for `codex exec`, where `-o` writes the answer to a file and stdout is the agent's reasoning transcript. Fixed to measure the answer. The figure remains an estimate.
+
+**5. The cross-vendor claim is under-evidenced.**
+
+The thing this tool exists to do has been validated end to end on **one phase**. `runs/claudex` is a real 17-phase run but was single-vendor (Claude critiquing Claude). `runs/tetris` and `runs/findit` look like real runs and are not — their ledgers are 100% `offline: true`, i.e. mock. `runs/space-attack` is the only genuine cross-vendor evidence and it completed 1 of 23 phases.
+
+There is also no measured comparison of cross-vendor output against single-vendor output, so the 5× call cost is unjustified rather than merely unmeasured. Treat every score in this repo as a model grading a model with no external baseline.
+
+**6. `make` has never completed against a real transport.**
+
+No `runs/*/product` directory exists. Product generation is exercised only by the offline mock test.

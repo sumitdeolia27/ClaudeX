@@ -38,6 +38,10 @@ class Settings:
     cache_dir: Path = field(default_factory=lambda: PROJECT_ROOT / ".cache")
     use_cache: bool = True
     timeout: int = 300
+    # Directory the CLI transport's agent loop runs in. `claude -p` and
+    # `codex exec` READ this directory, so it decides which source tree ends
+    # up cited in the blueprint. None means "the run's own directory".
+    project_dir: Path | None = None
 
     @property
     def models_path(self) -> Path:
@@ -67,6 +71,25 @@ class ModelRegistry:
         self.escalation: dict = data.get("escalation", {})
         self.cli_settings: dict = data.get("cli", {})
         self.transport = transport
+        # Set explicitly by the caller via set_cli_cwd(). Left as None the CLI
+        # provider refuses to guess, because guessing means os.getcwd(), which
+        # is ClaudeX's own repo and not the project being planned.
+        self._cli_cwd: Path | None = None
+
+    # -- CLI working directory -------------------------------------------
+
+    def set_cli_cwd(self, path) -> None:
+        """Pin the directory the vendor CLIs run in.
+
+        This is not cosmetic. `claude -p` and `codex exec` are agent loops that
+        read their working directory, so whatever is set here is the source
+        tree the models actually see and cite.
+        """
+        self._cli_cwd = Path(path).resolve() if path else None
+
+    @property
+    def cli_cwd(self) -> Path | None:
+        return self._cli_cwd
 
     @classmethod
     def load(cls, settings: Settings, transport: str = "api") -> "ModelRegistry":

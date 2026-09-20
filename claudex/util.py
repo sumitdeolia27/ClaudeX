@@ -92,6 +92,19 @@ def strip_json_blocks(text: str) -> str:
     return re.sub(r"```json\s*.+?```", "", text, flags=re.S).strip()
 
 
+
+def score_text(value, width: int = 0) -> str:
+    """Render a rubric score, distinguishing "unscored" from "scored zero"."""
+    text = "--" if value is None else f"{float(value):.0f}"
+    return text.rjust(width) if width else text
+
+
+def mean_score(values) -> float | None:
+    """Average only the phases that actually have a score."""
+    real = [float(v) for v in values if v is not None]
+    return sum(real) / len(real) if real else None
+
+
 # ---------------------------------------------------------------- time ----
 
 

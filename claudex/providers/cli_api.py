@@ -129,6 +129,21 @@ class CLIProvider(Provider):
             env.pop(var, None)
         return env
 
+    def _resolved_cwd(self) -> Path:
+        """Where the agent loop runs. Never guesses."""
+        cwd = self.registry.cli_cwd
+        if cwd is None:
+            raise ProviderError(
+                "No project directory is set for the CLI transport.\n"
+                "  The vendor CLIs read their working directory, so this has"
+                " to be explicit - otherwise the model reads ClaudeX's own"
+                " source tree instead of your project.\n"
+                "  Pass --project-dir to point at the code you are planning."
+            )
+        if not cwd.is_dir():
+            raise ProviderError(f"Project directory does not exist: {cwd}")
+        return cwd
+
     # -- main entry point -------------------------------------------------
 
     def complete(
@@ -163,10 +178,13 @@ class CLIProvider(Provider):
                 errors="replace",
                 timeout=self.timeout,
                 env=self._env(),
-                # Windows resolves .cmd shims only through the shell path lookup
-                # that subprocess already does; cwd is pinned so the CLI does not
-                # pick up whatever project happens to be the current directory.
-                cwd=str(self.registry.data.get("_cli_cwd") or os.getcwd()),
+                # This cwd is load-bearing, not cosmetic. `claude -p` and
+                # `codex exec` are agent loops that READ their working
+                # directory, so this decides which source tree the model sees
+                # and cites. It must be set explicitly by the caller - falling
+                # back to os.getcwd() means the model reads ClaudeX's own repo
+                # while planning somebody else's project.
+                cwd=str(self._resolved_cwd()),
             )
         except subprocess.TimeoutExpired as exc:
             raise RetryableError(
@@ -243,9 +261,12 @@ class CLIProvider(Provider):
             tier=tier,
             model=model,
             # No usage reporting from the CLIs, so these are estimates and the
-            # ledger prices them at zero anyway.
+            # ledger prices them at zero anyway. Estimate from `answer`, not
+            # stdout: when output_file_flag is set the answer comes from the
+            # temp file and stdout is the agent's reasoning transcript, which
+            # would measure something else entirely.
             tokens_in=estimate_tokens(prompt),
-            tokens_out=estimate_tokens(stdout),
+            tokens_out=estimate_tokens(answer),
             latency=elapsed,
             raw={"transport": "cli", "exit": proc.returncode, "estimated_tokens": True},
         )

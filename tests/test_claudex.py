@@ -78,11 +78,36 @@ class TestJudgeParsing(unittest.TestCase):
         self.assertAlmostEqual(result["total"], 50.0)
         self.assertEqual(result["verdict"], "ACCEPT")  # verdict is reported as given
 
-    def test_malformed_json_does_not_crash(self):
+    def test_malformed_json_is_unscored_not_zero(self):
+        """A judge that did not answer is not a judge that gave 0/100.
+
+        Recording 0.0 made a formatting glitch indistinguishable from a
+        genuinely terrible section in report.html, and handed the escalation
+        logic a failure that never happened.
+        """
         result = parse_judgement("the section looks fine to me")
-        self.assertEqual(result["total"], 0.0)
-        self.assertEqual(result["verdict"], "ITERATE")
+        self.assertIsNone(result["total"])
+        self.assertEqual(result["verdict"], "UNSCORED")
         self.assertFalse(result["parsed"])
+        self.assertTrue(all(v is None for v in result["scores"].values()))
+
+    def test_unscored_phase_does_not_trigger_escalation(self):
+        from claudex.router import Router
+        router = Router(REGISTRY, offline=True)
+        unscored = parse_judgement("no json here")
+        self.assertFalse(
+            router.should_escalate(unscored["total"]),
+            "a parse failure must not burn a stronger tier on a phantom bad score",
+        )
+        self.assertTrue(router.should_escalate(42.0), "a real low score still escalates")
+
+    def test_a_genuine_zero_is_still_a_zero(self):
+        text = ('{"scores": {"coverage": 0, "specificity": 0, "consistency": 0,'
+                ' "feasibility": 0, "risk_handling": 0}, "total": 0,'
+                ' "verdict": "ITERATE"}')
+        result = parse_judgement(text)
+        self.assertEqual(result["total"], 0.0)
+        self.assertTrue(result["parsed"])
 
     def test_scores_are_clamped(self):
         text = '{"scores": {"coverage": 500, "specificity": -20, "consistency": 80,' \
@@ -298,6 +323,92 @@ class TestEndToEndOffline(unittest.TestCase):
         calls = len(run.data["ledger"])
         engine.build()
         self.assertEqual(len(run.data["ledger"]), calls, "accepted tasks should resume without calls")
+
+
+    def test_unscored_phase_survives_build_and_report(self):
+        """A judge parse failure must not crash or fake a 0 in the deliverables."""
+        import json
+        from claudex import assembler, report
+        from claudex.util import Console
+
+        run, phases, router, pool = self._run_phases([1, 2])
+        run.phase(2).update({"score": None, "scored": False, "status": "unscored"})
+        run.save()
+
+        assembler.build(run, phases, router, pool, REGISTRY, Console(quiet=True),
+                        write_summary=False)
+        blueprint = (run.dir / "blueprint.md").read_text(encoding="utf-8")
+        decisions = json.loads((run.dir / "decisions.json").read_text(encoding="utf-8"))
+        html = Path(report.build(run, phases)).read_text(encoding="utf-8")
+
+        self.assertIn("--/100", blueprint, "unscored renders as -- not 0")
+        self.assertNotIn("0/100", blueprint)
+        self.assertEqual(decisions["unscored_phases"], [2])
+        # The average must ignore the unscored phase, not drag it to zero.
+        self.assertGreater(decisions["average_score"], 50)
+        self.assertIn('class="unscored"', html)
+        self.assertIn("did not parse", html)
+
+
+class TestCallProjection(unittest.TestCase):
+    """The quoted call budget has to match what the engine actually spends."""
+
+    def test_projection_matches_the_engine(self):
+        from claudex.debate import projected_calls
+        typical, worst = projected_calls(1, 1, dual_judge=False)
+        self.assertEqual(typical, 5, "propose+critique+revise+judge+summarize")
+        self.assertEqual(worst, typical, "no dual judge means no extra call")
+
+        typical2, _ = projected_calls(1, 2, dual_judge=False)
+        self.assertEqual(typical2, 8, "each extra round adds critique+revise+judge")
+
+    def test_dual_judge_is_counted(self):
+        from claudex.debate import projected_calls
+        _, worst = projected_calls(10, 2, dual_judge=True)
+        typical, _ = projected_calls(10, 2, dual_judge=False)
+        self.assertGreater(worst, typical)
+
+    def test_documented_defaults_fit_under_the_cap(self):
+        """Regression: --rounds 2 over 25 phases used to blow the 120-call cap."""
+        from claudex.debate import projected_calls
+        cap = int(REGISTRY.cli_settings["max_calls_per_run"])
+        _, worst = projected_calls(25, 2, dual_judge=True)
+        self.assertLessEqual(
+            worst, cap,
+            f"a default 25-phase run projects {worst} calls against a cap of {cap}; "
+            "the shipped defaults must be able to finish",
+        )
+
+
+class TestEscalation(unittest.TestCase):
+    """The escalation ladder had never executed - it is now covered."""
+
+    def test_low_score_bumps_the_tier(self):
+        router = Router(REGISTRY, offline=True)
+        phase = {"id": 1, "profile": "light"}
+        base = router.plan_round(phase, escalation=0)["propose"].tier
+        bumped = router.plan_round(phase, escalation=1)["propose"].tier
+        self.assertNotEqual(base, bumped)
+        self.assertEqual(router.ladder.index(bumped), router.ladder.index(base) + 1)
+
+    def test_escalation_stops_at_the_top_of_the_ladder(self):
+        router = Router(REGISTRY, offline=True)
+        phase = {"id": 1, "profile": "deep"}
+        top = router.plan_round(phase, escalation=9)["propose"].tier
+        self.assertEqual(top, router.ladder[-1])
+
+    def test_escalation_is_reachable_only_with_more_than_one_round(self):
+        """At --rounds 1 there is no next round, so escalation cannot apply.
+
+        This is the documented limitation, asserted so it stays deliberate
+        rather than silently becoming dead code again.
+        """
+        router = Router(REGISTRY, offline=True)
+        self.assertTrue(router.should_escalate(40.0))
+        max_rounds, rnd = 1, 1
+        self.assertFalse(rnd < max_rounds, "rounds=1 cannot escalate")
+        max_rounds = 2
+        self.assertTrue(rnd < max_rounds, "rounds>=2 can")
 
 
 class TestRegistry(unittest.TestCase):

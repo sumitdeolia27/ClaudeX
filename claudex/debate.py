@@ -12,8 +12,8 @@ import time
 
 from . import prompts
 from .util import (
-    extract_json, human_duration, now_iso, strip_json_blocks, truncate, write_json,
-    write_text,
+    extract_json, human_duration, now_iso, score_text, strip_json_blocks,
+    truncate, write_json, write_text,
 )
 
 RUBRIC_KEYS = ("coverage", "specificity", "consistency", "feasibility", "risk_handling")
@@ -22,14 +22,48 @@ SUMMARIZE_OVER = 2800
 BORDERLINE = 8
 
 
+def projected_calls(n_phases: int, rounds: int, dual_judge: bool = True) -> tuple[int, int]:
+    """(typical, worst-case) model calls for a run. Must match run_phase().
+
+    Per phase, round 1 costs propose + critique + revise + judge. Every extra
+    round reuses the previous revision as the draft, so it costs 3. One
+    summarize call condenses an accepted section for downstream phases, and a
+    borderline score can add a second judge in any round.
+
+    This lives next to the engine on purpose: when the call pattern changes,
+    the estimate the user is quoted has to change with it.
+    """
+    rounds = max(1, rounds)
+    per_phase = 4 + 3 * (rounds - 1) + 1
+    typical = per_phase * n_phases
+    worst = (per_phase + (rounds if dual_judge else 0)) * n_phases
+    return typical, worst
+
+
 # ---------------------------------------------------------- scoring ------
 
 
 def parse_judgement(text: str) -> dict:
-    """Turn a judge reply into a score dict, defending against malformed JSON."""
+    """Turn a judge reply into a score dict, defending against malformed JSON.
+
+    A reply that does not parse yields total=None, NOT 0.0. Those are different
+    facts: 0/100 means the judge read the section and hated it, None means no
+    judgement exists. Collapsing them made a formatting glitch indistinguishable
+    from a terrible section in report.html, and fed the escalation logic a
+    failure that never happened.
+    """
     data = extract_json(text) or {}
     if not isinstance(data, dict):
         data = {}
+    if not data:
+        return {
+            "scores": {key: None for key in RUBRIC_KEYS},
+            "total": None,
+            "verdict": "UNSCORED",
+            "blocking_gaps": [],
+            "note": "judge reply did not parse as JSON",
+            "parsed": False,
+        }
     raw_scores = data.get("scores") if isinstance(data.get("scores"), dict) else {}
     scores = {}
     for key in RUBRIC_KEYS:
@@ -139,7 +173,8 @@ class DebateEngine:
         rounds: list[dict] = []
         escalation = 0
         section = ""
-        judgement = {"total": 0.0, "verdict": "ITERATE", "blocking_gaps": [], "scores": {}}
+        judgement = {"total": None, "verdict": "UNSCORED", "blocking_gaps": [],
+                     "scores": {}}
         plan = self.router.plan_round(phase, escalation)
 
         for rnd in range(1, self.max_rounds + 1):
@@ -174,9 +209,14 @@ class DebateEngine:
             issues = count_issues(critique_text)
 
             self.console.step(
-                f"score {judgement['total']:.0f}/100 -> {judgement['verdict']}"
+                f"score {score_text(judgement['total'])}/100 -> {judgement['verdict']}"
                 f"   (issues: {issues['blocker']}B/{issues['major']}M/{issues['minor']}m)"
             )
+            if judgement["total"] is None:
+                self.console.warn(
+                    "the judge's reply did not parse - this phase is UNSCORED, "
+                    "not bad. Check `parsed` in the transcript."
+                )
             for gap in judgement["blocking_gaps"][:2]:
                 self.console.dim(f"gap: {gap[:110]}")
 
@@ -193,13 +233,15 @@ class DebateEngine:
                 "issues": issues,
             })
 
-            if judgement["total"] >= self.accept_score:
+            if judgement["total"] is not None and judgement["total"] >= self.accept_score:
                 break
             if rnd < self.max_rounds and self.router.should_escalate(judgement["total"]):
                 escalation += 1
                 self.console.dim("score below escalation threshold - stronger tier next round")
 
-        accepted = judgement["total"] >= self.accept_score
+        accepted = (
+            judgement["total"] is not None and judgement["total"] >= self.accept_score
+        )
         self._persist(phase, section, rounds, judgement, accepted, plan, started)
         return {"accepted": accepted, "score": judgement["total"], "rounds": len(rounds)}
 
@@ -216,7 +258,12 @@ class DebateEngine:
 
         # A borderline score decides whether a phase gets another expensive
         # round, so it is worth a second opinion from the other vendor.
-        borderline = abs(judgement["total"] - self.accept_score) <= BORDERLINE
+        # An unparsed primary is worth a second opinion too - that is exactly
+        # the case where one more cheap call can rescue the phase.
+        borderline = (
+            judgement["total"] is None
+            or abs(judgement["total"] - self.accept_score) <= BORDERLINE
+        )
         if self.dual_judge and borderline and len(self.router.live) > 1:
             second_assignment = self.router.tiebreak_judge(
                 phase, plan["propose"].vendor, escalation
@@ -231,13 +278,18 @@ class DebateEngine:
                 judgement["judges"].append(
                     {"vendor": second_assignment.vendor, "total": other["total"]}
                 )
-                averaged = round((judgement["total"] + other["total"]) / 2, 1)
+                totals = [t for t in (judgement["total"], other["total"]) if t is not None]
+                averaged = round(sum(totals) / len(totals), 1) if totals else None
                 self.console.dim(
-                    f"borderline: {judgement['total']:.0f} vs {other['total']:.0f} "
-                    f"-> averaged {averaged:.0f}"
+                    f"borderline: {score_text(judgement['total'])} vs "
+                    f"{score_text(other['total'])} -> {score_text(averaged)}"
                 )
                 judgement["total"] = averaged
-                judgement["verdict"] = "ACCEPT" if averaged >= self.accept_score else "ITERATE"
+                judgement["verdict"] = (
+                    "UNSCORED" if averaged is None
+                    else "ACCEPT" if averaged >= self.accept_score else "ITERATE"
+                )
+                judgement["parsed"] = judgement.get("parsed") or other.get("parsed", False)
                 judgement["blocking_gaps"] = (
                     judgement["blocking_gaps"] + other["blocking_gaps"]
                 )[:8]
@@ -249,7 +301,7 @@ class DebateEngine:
         pid = phase["id"]
         section_path = self.run.section_path(phase)
         header = (
-            f"<!-- phase {pid} | score {judgement['total']:.0f}/100 | "
+            f"<!-- phase {pid} | score {score_text(judgement['total'])}/100 | "
             f"{len(rounds)} round(s) | author {rounds[-1]['author']} | "
             f"critic {rounds[-1]['critic']} | {now_iso()} -->\n\n"
         )
@@ -266,8 +318,13 @@ class DebateEngine:
             "id": pid,
             "title": phase["title"],
             "slug": phase["slug"],
-            "status": "accepted" if accepted else "needs_work",
+            "status": (
+                "accepted" if accepted
+                else "unscored" if judgement["total"] is None
+                else "needs_work"
+            ),
             "score": judgement["total"],
+            "scored": judgement["total"] is not None,
             "scores": judgement["scores"],
             "rounds": len(rounds),
             "author": rounds[-1]["author"],
@@ -283,8 +340,13 @@ class DebateEngine:
         })
         self.run.save()
 
-        verdict = "accepted" if accepted else "kept with open gaps"
-        line = f"phase {pid} {verdict} at {judgement['total']:.0f}/100 in {human_duration(elapsed)}"
+        verdict = (
+            "accepted" if accepted
+            else "kept UNSCORED (judge reply unparsable)" if judgement["total"] is None
+            else "kept with open gaps"
+        )
+        line = (f"phase {pid} {verdict} at {score_text(judgement['total'])}/100 "
+                f"in {human_duration(elapsed)}")
         (self.console.ok if accepted else self.console.warn)(line)
 
     def _summarize(self, phase, section, plan) -> str:
@@ -299,7 +361,10 @@ class DebateEngine:
         try:
             return self._call(
                 assignment, prompts.summarize(phase, body), phase["id"],
-                max_tokens=700, temperature=0.2,
+                # The summary now carries a reason per decision, so it needs
+                # room. Starving it here is what produced telegraphic output
+                # that later phases could not actually reason about.
+                max_tokens=1100, temperature=0.2,
             ).text.strip()
         except Exception as exc:  # summarisation is an optimisation, never fatal
             self.console.warn(f"summary failed ({str(exc)[:80]}), using truncated section")

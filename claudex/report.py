@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import json
 
-from .util import now_iso, write_text
+from .util import mean_score, now_iso, score_text, write_text
 
 CSS = """
 :root{--bg:#fbfbfa;--fg:#1c1c1a;--muted:#6b6b66;--line:#e3e3df;--card:#fff;
@@ -34,6 +34,7 @@ tr:last-child td{border-bottom:none}
 .bar>i{display:block;height:100%;border-radius:3px}
 .v-claude{color:var(--a);font-weight:600}.v-gpt{color:var(--b);font-weight:600}
 .good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.unscored{color:var(--muted);font-style:italic}
 .note{color:var(--muted);font-size:13px;margin-top:8px}
 code{background:var(--line);padding:1px 5px;border-radius:4px;font-size:13px}
 @media(max-width:620px){body{padding:20px 12px}table{font-size:13px}
@@ -41,7 +42,11 @@ th,td{padding:7px 8px}.hide-s{display:none}}
 """
 
 
-def _score_class(score: float) -> str:
+def _score_class(score) -> str:
+    # None means the judge reply never parsed. That is not a bad score, and
+    # rendering it as one made a formatting glitch look like a failed section.
+    if score is None:
+        return "unscored"
     return "good" if score >= 80 else "warn" if score >= 65 else "bad"
 
 
@@ -53,23 +58,25 @@ def _vendor_span(name: str) -> str:
 def build(run, phases: list[dict]) -> str:
     done = [p for p in phases if run.phase(p["id"]).get("section_file")]
     totals = run.totals()
-    scores = [run.phase(p["id"]).get("score", 0) for p in done]
-    avg = sum(scores) / len(scores) if scores else 0
+    scores = [run.phase(p["id"]).get("score") for p in done]
+    avg = mean_score(scores)
+    unscored = sum(1 for v in scores if v is None)
     accepted = sum(1 for p in done if run.phase(p["id"]).get("status") == "accepted")
 
     rows = []
     for phase in done:
         meta = run.phase(phase["id"])
-        score = meta.get("score", 0)
+        score = meta.get("score")
+        bar_width = 2 if score is None else max(2, min(100, score))
         rows.append(f"""<tr>
 <td>{phase['id']}</td>
 <td>{html.escape(phase['title'])}</td>
 <td class="hide-s">{_vendor_span(meta.get('author'))}</td>
 <td class="hide-s">{_vendor_span(meta.get('critic'))}</td>
 <td>{meta.get('rounds', 0)}</td>
-<td><div class="bar"><i style="width:{max(2, min(100, score)):.0f}%;
+<td><div class="bar"><i style="width:{bar_width:.0f}%;
 background:currentColor" class="{_score_class(score)}"></i></div></td>
-<td class="{_score_class(score)}">{score:.0f}</td>
+<td class="{_score_class(score)}" title="{'judge reply did not parse - no score exists' if score is None else ''}">{score_text(score)}</td>
 </tr>""")
 
     model_rows = []
@@ -109,11 +116,12 @@ generated {now_iso()[:16].replace('T', ' ')} UTC</div>
 <div class="card"><div class="k">Sections</div><div class="v">{len(done)}</div></div>
 <div class="card"><div class="k">Accepted</div><div class="v">{accepted}/{len(done)}</div></div>
 <div class="card"><div class="k">Avg score</div>
-<div class="v {_score_class(avg)}">{avg:.0f}</div></div>
+<div class="v {_score_class(avg)}">{score_text(avg)}</div></div>
 <div class="card"><div class="k">Model calls</div><div class="v">{totals['calls']}</div></div>
 <div class="card"><div class="k">{'Est. spend' if totals['cost_is_estimate'] else 'Spend'}</div>
 <div class="v">${totals['cost']:.2f}</div></div>
 </div>
+{f'<p class="note warn">{unscored} section(s) show <code>--</code>: the judge reply did not parse, so no score exists. That is not the same as a low score &mdash; check <code>parsed</code> in the transcript.</p>' if unscored else ''}
 {'<p class="note warn">Offline run &mdash; no API calls were made and nothing was spent. The figure above is what this same run would cost with real keys.</p>' if totals['cost_is_estimate'] else ''}
 
 <h2>Phases</h2>
