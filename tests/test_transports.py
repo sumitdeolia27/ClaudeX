@@ -137,6 +137,25 @@ class TestCLIProvider(unittest.TestCase):
         self.assertIn("--skip-git-repo-check", seen["argv"])
         self.assertIn("read-only", seen["argv"], "codex must not be able to edit files")
 
+    def test_successful_codex_transcript_is_not_scanned_for_quota_words(self):
+        from claudex.providers.cli_api import CLIProvider
+        with mock.patch("shutil.which", return_value="/usr/bin/codex"):
+            provider = CLIProvider("gpt", self.registry)
+
+        def fake_run(argv, **kwargs):
+            path = argv[argv.index("-o") + 1]
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write('{"approved":true,"issues":[]}')
+            return mock.Mock(
+                returncode=0,
+                stdout="agent transcript: review the quota policy",
+                stderr="user prompt discussed subscription quota and login",
+            )
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            out = provider.complete("s", [{"role": "user", "content": "q"}], "fast")
+        self.assertIn('"approved":true', out.text)
+
     def test_agent_runs_in_the_project_dir_not_the_claudex_repo(self):
         """Regression: cwd used to fall back to os.getcwd(), i.e. ClaudeX itself.
 
@@ -260,6 +279,17 @@ class TestCLIProvider(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("Sep 20th, 2026 12:11 PM", message, "reset time is surfaced")
         self.assertIn("--via api", message, "offers the paid escape hatch")
+
+    def test_short_successful_answer_may_discuss_quota(self):
+        """A concise review is content even when it contains outage keywords."""
+        provider = self._provider()
+        answer = '{"approved":false,"issues":[{"problem":"define a quota policy"}]}'
+        fake = mock.Mock(returncode=0, stdout=answer, stderr="")
+        with mock.patch("subprocess.run", return_value=fake):
+            completion = provider.complete(
+                "s", [{"role": "user", "content": "review this"}], "fast"
+            )
+        self.assertEqual(completion.text, answer)
 
     def test_quota_exhausted_is_not_mistaken_for_a_login_problem(self):
         # "Upgrade to Pro" contains no auth words, but credit errors elsewhere

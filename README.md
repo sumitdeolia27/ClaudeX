@@ -227,6 +227,7 @@ python -m claudex runs
 | `--offline` | run, build, make, create | deterministic mock, no calls, no spend |
 | `--project-dir <path>` | run, make, create | directory the CLI agents read while planning. Defaults to the run's folder, **not** the ClaudeX repo |
 | `--lead claude\|gpt` | run, make, create | force one author instead of alternating |
+| `--solo claude\|gpt` | make | one vendor writes *and* reviews, instead of cross-vendor review. Unblocks a build when the other vendor's window is spent — scores become self-assessed |
 | `--no-dual-judge` | run | skip the second judge on borderline scores |
 | `--yes` / `-y` | run, make, create | skip the confirmation prompt |
 
@@ -285,6 +286,8 @@ quota:    ~200 calls typical, 250 worst case, cap 260 (config/models.json)
 ```
 
 **To spend less**, change `routing` in the same file — move `propose`, `critique` and `revise` from `deep` to `balanced`. That takes the heavy calls off the top-tier model and roughly cuts time and quota by half, at some quality cost.
+
+**When one vendor's window is already spent**, `claudex make --solo claude` (or `--solo gpt`) builds with that vendor alone rather than waiting for the other to reset. The same model then writes, critiques and scores, so the rubric is self-assessed — which is why `run`, `create` and `build` do not offer the flag.
 
 Two roles are deliberately *not* cheap, and moving them down costs more than it saves:
 
@@ -411,7 +414,9 @@ runs/<slug>/
 
 `providers/cli_api.py` scanned the model's own answer for `QUOTA_EXHAUSTED` tokens, which include the bare word `"quota"`. Any section discussing subscription tooling, or a browser game's `QuotaExceededError` from `localStorage`, triggered a non-retryable `QuotaExhausted` and killed the run on a call that had actually succeeded.
 
-Fixed by gating body-text scanning on `returncode != 0 or len(answer) <= ERROR_TEXT_MAX` — a real CLI error is short, a blueprint section is not. The same reasoning applies to the `AUTH_FAILURE` check, which previously read `answer[:300]` unconditionally.
+Fixed by gating body-text scanning on *shape* rather than length. Length was not a safe signal either: a judge's JSON verdict sits well under `ERROR_TEXT_MAX` and routinely discusses quota, login or timeout behaviour as ordinary project content. `_looks_like_cli_error()` now requires a diagnostic-shaped prefix (`error:`, `usage limit reached`, `not authenticated`, …) before an exit-zero answer may be read as a failure; on a non-zero exit the whole output is still scanned. The same gate guards the `AUTH_FAILURE` check, which previously read `answer[:300]` unconditionally.
+
+A related trap on the same path: `codex exec` writes its agent transcript — including the user's full prompt — to stderr even on success, so a successful call's stderr must never be keyword-scanned.
 
 **2. A judge parse failure was recorded as a score of 0.** *(fixed)*
 

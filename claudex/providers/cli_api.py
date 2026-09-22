@@ -42,6 +42,21 @@ TRANSIENT = (
 # Above this, body text is treated as content and never as a diagnostic.
 ERROR_TEXT_MAX = 600
 
+
+def _looks_like_cli_error(text: str) -> bool:
+    """Distinguish a CLI diagnostic from short model-authored content.
+
+    Reviews and JSON judgements are often under ``ERROR_TEXT_MAX`` and may
+    legitimately contain words such as quota, login, timeout, or credential.
+    Real exit-zero CLI failures have an explicit diagnostic-shaped prefix.
+    """
+    value = (text or "").lstrip().lower()
+    return value.startswith((
+        "error:", "fatal:", "failed to ", "you've hit your ",
+        "you have no credits", "you have no credit", "usage limit reached",
+        "not authenticated", "please sign in", "please log in",
+    ))
+
 # Text that means the user must act - retrying will never help.
 AUTH_FAILURE = (
     "oauth", "not authenticated", "unauthenticated", "log in", "login",
@@ -217,11 +232,18 @@ class CLIProvider(Provider):
         # "credential"; a testing phase says "timeout" and "429". Scanning a
         # successful answer for those tokens turns the model's own prose into a
         # fake outage - and QuotaExhausted is non-retryable, so it kills the run.
-        # Real CLI failure messages are short, so only let body text act as a
-        # diagnostic when the call failed or the output is too short to be an answer.
-        diagnostic = stderr.lower()
-        if proc.returncode != 0 or len(answer) <= ERROR_TEXT_MAX:
+        # Real exit-zero failures have a diagnostic-shaped prefix. Length is
+        # not a safe signal: JSON reviews are short and routinely discuss
+        # quota/login/timeout behavior as ordinary project content.
+        body_is_error = _looks_like_cli_error(answer)
+        # Codex writes its agent transcript (including the user's full prompt)
+        # to the diagnostic stream even on success. Never keyword-scan that
+        # transcript when a successful call produced a real final answer.
+        diagnostic = ""
+        if proc.returncode != 0:
             diagnostic = f"{stderr}\n{stdout}\n{answer}".lower()
+        elif body_is_error:
+            diagnostic = answer.lower()
 
         combined = diagnostic
         quota_hit = any(token in combined for token in QUOTA_EXHAUSTED)
@@ -245,9 +267,9 @@ class CLIProvider(Provider):
                 f"{self.exe_name} failed (exit {proc.returncode}): {detail[:400]}"
             )
 
-        # Same reasoning as above: a real "not signed in" message is short. A
-        # 30k-character section that happens to discuss login flows is not one.
-        if len(answer) <= ERROR_TEXT_MAX and any(
+        # Same reasoning as above: only diagnostic-shaped output can be an
+        # exit-zero authentication failure.
+        if body_is_error and any(
             token in answer.lower()[:300] for token in AUTH_FAILURE
         ):
             raise ProviderError(

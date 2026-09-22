@@ -36,22 +36,7 @@ class Assignment:
 
 
 class Router:
-    def __init__(
-        self,
-        registry,
-        lead: str = "alternate",
-        offline: bool = False,
-        solo: str = "",
-    ):
-        """`solo` narrows the run to ONE vendor on purpose.
-
-        This is different from `lead`, which only decides who writes first and
-        leaves the other vendor as critic. `solo` removes the second vendor
-        entirely, so the same model writes, critiques and scores. That makes
-        the rubric self-assessed, which is why the debate commands do not offer
-        it - only `make`, where one vendor writing all the code is fine and the
-        other vendor's quota window is pure friction.
-        """
+    def __init__(self, registry, lead: str = "alternate", offline: bool = False):
         self.registry = registry
         self.lead = lead
         self.offline = offline
@@ -60,26 +45,8 @@ class Router:
 
         all_vendors = list(registry.vendors)
         self.live = all_vendors if offline else registry.live_vendors()
-
-        self.solo = (solo or "").strip()
-        if self.solo:
-            if self.solo not in all_vendors:
-                raise SystemExit(
-                    f"Unknown vendor '{self.solo}' for --solo. "
-                    f"Known: {', '.join(all_vendors)}"
-                )
-            if not offline and self.solo not in self.live:
-                raise SystemExit(
-                    f"--solo {self.solo} was asked for, but {self.solo} is not "
-                    f"reachable over the '{registry.transport}' transport.\n"
-                    f"  Reachable now: {', '.join(self.live) or 'none'}\n"
-                    f"  Run `claudex setup` to see what is missing."
-                )
-            self.live = [self.solo]
-
         self.mode = (
             "offline" if offline
-            else "solo" if self.solo
             else "cross-vendor" if len(self.live) >= 2
             else "single-vendor" if len(self.live) == 1
             else "no-keys"
@@ -153,8 +120,6 @@ class Router:
                 why=(
                     f"cross-examined by {critic} (different vendor from the author)"
                     if not single
-                    else f"--solo {self.solo}: {critic} critiques its own draft"
-                    if self.solo
                     else f"only {critic} has a key - self-critique, weaker by design"
                 ),
             ),
@@ -178,12 +143,6 @@ class Router:
     def describe(self) -> str:
         if self.mode == "offline":
             return "offline - deterministic mock provider, no API calls, no spend"
-        if self.mode == "solo":
-            return (
-                f"solo - {self.solo} only, by request (--solo). It writes, "
-                "critiques and scores its own work, so treat the scores as "
-                "self-assessed rather than cross-examined."
-            )
         if self.mode == "cross-vendor":
             return f"cross-vendor - authorship alternates across {', '.join(self.live)}"
         if self.mode == "single-vendor":

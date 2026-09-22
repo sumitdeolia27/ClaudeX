@@ -21,7 +21,10 @@
             "--version"
           ],
           "login_hint": "claude login",
-          "extra_args": []
+          "extra_args": [
+            "--effort",
+            "medium"
+          ]
         }
       },
       "tiers": {

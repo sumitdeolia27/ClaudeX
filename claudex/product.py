@@ -44,22 +44,35 @@ def safe_product_path(workspace: Path, raw: str) -> Path:
 
 
 def _json_call(pool, run, registry, assignment, system, user, role) -> dict:
-    completion = pool.complete(
-        vendor=assignment.vendor,
-        tier=assignment.tier,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        max_tokens=8000,
-        temperature=0.2,
-    )
-    run.record(0, role, assignment, completion, registry)
-    payload = extract_json(completion.text)
-    if not isinstance(payload, dict):
-        raise ProviderError(
-            f"{assignment.label} returned invalid JSON for {role}. "
-            "The product run is saved and can be resumed."
+    messages = [{"role": "user", "content": user}]
+    for attempt in range(2):
+        completion = pool.complete(
+            vendor=assignment.vendor,
+            tier=assignment.tier,
+            system=system,
+            messages=messages,
+            max_tokens=8000,
+            temperature=0.2,
         )
-    return payload
+        run.record(
+            0, role if attempt == 0 else f"{role}_json_retry",
+            assignment, completion, registry,
+        )
+        payload = extract_json(completion.text)
+        if isinstance(payload, dict):
+            return payload
+        messages.extend([
+            {"role": "assistant", "content": completion.text},
+            {"role": "user", "content": (
+                "Your response was not a valid JSON object. Return the same "
+                "answer again as one valid JSON object matching the requested "
+                "schema. No prose, markdown fences, comments, or trailing text."
+            )},
+        ])
+    raise ProviderError(
+        f"{assignment.label} returned invalid JSON twice for {role}. "
+        "The product run is saved and can be resumed."
+    )
 
 
 def _clean_plan(payload: dict) -> list[dict]:
